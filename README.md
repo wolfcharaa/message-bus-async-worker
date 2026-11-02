@@ -3,9 +3,9 @@
 Optional operational worker runtime for
 `romanfedorskij/message-bus-async`.
 
-> Status: pre-release `0.1.0`. PostgreSQL consumption and durable transitions
-> are implemented, but the runner, per-job scope, control plane, and executable
-> are not ready for application use.
+> Status: pre-release `0.1.0`. PostgreSQL consumption, durable transitions, and
+> the AMPHP runner with per-job scopes are implemented. The worker control plane
+> and executable are not ready for application use.
 
 ## Responsibility Boundary
 
@@ -13,11 +13,13 @@ The worker package owns:
 
 - durable PostgreSQL claim and ack/retry/reject/cancel transitions;
 - lease-owner guarded heartbeat, cancellation polling, and stale recovery;
-- consumer options and received-message contracts.
+- consumer options and received-message contracts;
+- the AMPHP-native consumer loop, per-job service scope, heartbeat monitor, and
+  graceful process cancellation.
 
-The package will also own the per-job lifecycle scope, cancellable runner,
-worker control plane, Symfony Console executable, and optional process/signal
-adapters. Those runtime layers are not implemented yet.
+The package will also own the worker control plane, Symfony Console executable,
+and optional process/signal adapters. Those runtime layers are not implemented
+yet.
 
 Producer, status, cancellation, common queue schema, message registry, and local
 dispatch remain in the core package. The dependency direction is always worker
@@ -50,6 +52,22 @@ budget is exhausted. Stale selection and transitions run in one transaction
 with row locks, so parallel recovery processes do not recover the same job.
 See the [PostgreSQL consumer reference](docs/reference/postgres-consumer.md) for
 the exact contracts and lifecycle limits.
+
+## Worker Runner
+
+`QueueWorkerRunner` replaces the v6 blocking `usleep()` loop with AMPHP delay
+and cancellation. Every claimed job opens a fresh core `ServiceScopeInterface`,
+resolves `QueueWorkerInterface` inside it, and disposes the scope with the
+original handler failure. A concurrent monitor heartbeats the lease and polls
+durable cancellation while cooperative handler I/O is suspended.
+
+Process cancellation stops new claims but lets the current job finish within
+the configured grace period. Expiry cancels the job and persists retry/reject
+according to its attempt budget. Durable cancellation persists `cancelled`;
+non-retryable failures persist `failed`; successful work is acknowledged only
+after the job scope has completed. Final transitions use an independent
+cancellation phase so process shutdown cannot interrupt ack/retry halfway.
+See the [worker runner reference](docs/reference/worker-runner.md).
 
 ## Development
 

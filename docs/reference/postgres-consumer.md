@@ -71,13 +71,11 @@ does not accept a cancellation token for an already-running SQL statement, so
 the consumer observes cancellation only at safe boundaries and waits for an
 in-flight statement to reach a definite result.
 
-## Remaining Runtime Layer
+## Runner Integration
 
-This component does not execute handlers. The pending worker runner slice must:
-
-- open and deterministically dispose one message scope per claimed job;
-- deserialize the envelope through the core codec registry;
-- propagate AMPHP cancellation into handler and nested bus execution;
-- heartbeat long operations and poll the durable cancellation flag;
-- choose ack/retry/reject/cancel from the handler outcome;
-- stop gracefully without abandoning an in-process transition.
+`QueueWorkerRunner` now owns the consumer loop, one service scope per job,
+concurrent heartbeat/cancellation monitoring, durable outcome selection, and
+graceful process cancellation. The job-scoped `QueueWorkerInterface` adapter
+owns envelope deserialization and execution of the exact queued binding through
+the core registry/runtime. See the [worker runner reference](worker-runner.md)
+for lifecycle and failure classification.

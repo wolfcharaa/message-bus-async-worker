@@ -1,0 +1,25 @@
+{
+    "name": "romanfedorskij/message-bus-async-worker",
+    "description": "Optional worker runtime for romanfedorskij/message-bus-async",
+    "license": "MIT",
+    "type": "library",
+    "require": {
+        "php": "^8.4.12",
+        "romanfedorskij/message-bus-async": "^0.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Fedor\\MessageBus\\Worker\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "romanfedorskij",
+            "email": "markaryanroma@mail.ru"
+        }
+    ],
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable"
+}

@@ -4,12 +4,24 @@
     "license": "MIT",
     "type": "library",
     "require": {
+        "amphp/amp": "^3.1",
+        "amphp/postgres": "^2.2.1",
         "php": "^8.4.12",
+        "psr/clock": "^1.0",
         "romanfedorskij/message-bus-async": "^0.1"
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^2.3",
+        "phpunit/phpunit": "^12.0"
     },
     "autoload": {
         "psr-4": {
             "Fedor\\MessageBus\\Worker\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Fedor\\MessageBus\\Worker\\Tests\\": "tests/"
         }
     },
     "authors": [
@@ -20,6 +32,23 @@
     ],
     "config": {
         "sort-packages": true
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../MessageBusAsync",
+            "options": {
+                "symlink": true,
+                "versions": {
+                    "romanfedorskij/message-bus-async": "0.1.0"
+                }
+            }
+        }
+    ],
+    "scripts": {
+        "analyse": "phpstan analyse --level=max src tests integration-tests",
+        "test": "phpunit --do-not-cache-result",
+        "test:integration": "phpunit --configuration phpunit.integration.xml.dist --do-not-cache-result"
     },
     "minimum-stability": "stable"
 }

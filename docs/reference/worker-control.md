@@ -128,5 +128,6 @@ the stale worker from writing a transition.
 
 The current runner is cooperative and single-process. It cannot interrupt
 CPU-bound code that never suspends, and it does not send operating-system
-signals. Signal translation and a process-supervisor executable remain optional
-later adapters.
+signals. The bundled executable optionally translates process stop signals into
+AMPHP cancellation, but it deliberately does not implement the v6 `auto/fork`
+mode. A multi-process supervisor remains a separate package boundary.

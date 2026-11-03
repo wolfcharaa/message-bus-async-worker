@@ -78,9 +78,11 @@ The cancellation passed to `run()` is a stop request. Before a claim it ends the
 loop immediately. During a job it stops future claims and starts the grace
 window; the current handler may still finish and be acknowledged.
 
-Signal and console adapters should translate their stop request into an AMPHP
-`DeferredCancellation`. They remain separate optional process concerns and are
-not part of this runner slice.
+`PcntlSignalCancellation` is the optional process adapter used by the bundled
+Console executable. When `ext-pcntl` is available it translates `SIGTERM`,
+`SIGINT`, and `SIGQUIT` into the cancellation passed to `run()` and restores
+the previous handlers when the command finishes. The runner itself remains
+independent of Console and process-global signal state.
 
 ## Worker control runtime
 
@@ -93,8 +95,8 @@ the final stopped, failed, or restarting lifecycle.
 Pause and resume affect future claims. Drain, stop, and restart allow the
 current job to finish. Kill cancels the cooperative handler and settles the job
 through its existing retry/reject budget. Restart exposes
-`QueueWorkerRunResult::exitCode`; the later executable is responsible for
-returning that code to a process supervisor.
+`QueueWorkerRunResult::exitCode`; `worker:run` returns that code to a process
+supervisor.
 
 See the [worker control reference](worker-control.md) for targeting, cursor,
 schema, registry, and acknowledgement contracts.

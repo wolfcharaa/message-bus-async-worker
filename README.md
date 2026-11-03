@@ -6,8 +6,8 @@ Optional operational worker runtime for
 > Status: pre-release `0.1.0`. PostgreSQL consumption, durable transitions, the
 > AMPHP runner with per-job scopes, and the PostgreSQL worker control storage
 > are implemented. The runner applies durable worker-control commands and the
-> exact queued-binding adapter is available. The executable is not ready for
-> application use.
+> exact queued-binding adapter is available. A standalone Symfony Console
+> executable now exposes worker run, control, status, and schema operations.
 
 ## Responsibility Boundary
 
@@ -21,10 +21,9 @@ The worker package owns:
 - v6-compatible worker control commands, desired-state targeting, worker/child
   registry, acknowledgements, and their AMPHP PostgreSQL gateway;
 - job-scoped envelope deserialization and execution of the exact binding stored
-  in each queue row.
-
-The package will also own the Symfony Console executable and optional
-process/signal adapters. Those runtime layers are not implemented yet.
+  in each queue row;
+- the application-owned worker bootstrap contract, Symfony Console executable,
+  and optional PCNTL-to-AMPHP cancellation adapter.
 
 Producer, status, cancellation, common queue schema, message registry, and local
 dispatch remain in the core package. The dependency direction is always worker
@@ -37,10 +36,12 @@ to core; the core package must not reference worker symbols.
 - `amphp/amp` `3.1.x` or a compatible 3.x release;
 - `amphp/postgres` `2.2.1` or a compatible 2.x release, with `ext-pgsql` or
   `ext-pq` available to the worker process;
-- `psr/clock` `1.0.x`.
+- `psr/clock` `1.0.x`;
+- `symfony/console` `7.4.x` or a compatible release.
 
-Console and process dependencies will be declared only with the implementation
-slice that uses them.
+`ext-pcntl` is optional. When available, the executable translates `SIGTERM`,
+`SIGINT`, and `SIGQUIT` into cooperative AMPHP cancellation. Without it, process
+shutdown must be coordinated through worker control or another host adapter.
 
 ## PostgreSQL Consumer
 
@@ -96,6 +97,25 @@ registers its identity, polls and acknowledges commands, heartbeats status, and
 records its final lifecycle. See the
 [worker control reference](docs/reference/worker-control.md) for the exact
 contracts, schema boundary, cursor behavior, and runtime semantics.
+
+## Worker Executable
+
+`vendor/bin/message-bus-worker` is a separate application root for worker
+processes. The host application provides a PHP bootstrap returning
+`Fedor\MessageBus\Worker\Runtime\WorkerRuntime`; the package never imports an
+application container automatically.
+
+```bash
+vendor/bin/message-bus-worker worker:run \
+    --bootstrap=config/message-bus-worker.php \
+    --transport=postgres \
+    --queue=addresses
+```
+
+The same executable exposes durable pause/resume/drain/stop/kill/restart,
+worker status, and PostgreSQL control-schema generation. See the
+[worker CLI guide](docs/guides/worker-cli.md) for bootstrap examples, command
+options, exit behavior, and process-supervisor limits.
 
 ## Development
 

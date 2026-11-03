@@ -3,9 +3,10 @@
 Optional operational worker runtime for
 `romanfedorskij/message-bus-async`.
 
-> Status: pre-release `0.1.0`. PostgreSQL consumption, durable transitions, and
-> the AMPHP runner with per-job scopes are implemented. The worker control plane
-> and executable are not ready for application use.
+> Status: pre-release `0.1.0`. PostgreSQL consumption, durable transitions, the
+> AMPHP runner with per-job scopes, and the PostgreSQL worker control storage
+> are implemented. Automatic command application and the executable are not
+> ready for application use.
 
 ## Responsibility Boundary
 
@@ -15,11 +16,13 @@ The worker package owns:
 - lease-owner guarded heartbeat, cancellation polling, and stale recovery;
 - consumer options and received-message contracts;
 - the AMPHP-native consumer loop, per-job service scope, heartbeat monitor, and
-  graceful process cancellation.
+  graceful process cancellation;
+- v6-compatible worker control commands, desired-state targeting, worker/child
+  registry, acknowledgements, and their AMPHP PostgreSQL gateway.
 
-The package will also own the worker control plane, Symfony Console executable,
-and optional process/signal adapters. Those runtime layers are not implemented
-yet.
+The package will also own command application in the runner, the Symfony
+Console executable, and optional process/signal adapters. Those runtime layers
+are not implemented yet.
 
 Producer, status, cancellation, common queue schema, message registry, and local
 dispatch remain in the core package. The dependency direction is always worker
@@ -68,6 +71,21 @@ non-retryable failures persist `failed`; successful work is acknowledged only
 after the job scope has completed. Final transitions use an independent
 cancellation phase so process shutdown cannot interrupt ack/retry halfway.
 See the [worker runner reference](docs/reference/worker-runner.md).
+
+## Worker Control
+
+`DefaultWorkerControlService` and `PostgresWorkerControlGateway` preserve the
+v6 command, desired-state, targeting, cursor, registry, child lifecycle, and
+acknowledgement semantics while replacing PDO with `amphp/postgres`. Pause and
+resume persist durable desired state; drain, stop, kill, and restart are
+expiring one-shot commands. Every storage operation accepts AMPHP cancellation
+at safe I/O boundaries.
+
+The schema generator owns the complete worker-control table set so later
+process adapters do not require an incompatible migration. The current runner
+does not poll or apply these commands yet. See the
+[worker control reference](docs/reference/worker-control.md) for the exact
+contracts, schema boundary, cursor behavior, and current integration limit.
 
 ## Development
 

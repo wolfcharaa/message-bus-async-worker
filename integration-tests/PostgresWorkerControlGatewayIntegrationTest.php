@@ -10,6 +10,9 @@ use Amp\Postgres\PostgresConnectionPool;
 use DateTimeImmutable;
 use Fedor\MessageBus\Worker\Control\Postgres\PostgresWorkerControlGateway;
 use Fedor\MessageBus\Worker\Control\Postgres\PostgresWorkerControlSchemaGenerator;
+use Fedor\MessageBus\Worker\Control\WorkerActivityState;
+use Fedor\MessageBus\Worker\Control\WorkerChildInstance;
+use Fedor\MessageBus\Worker\Control\WorkerChildState;
 use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgement;
 use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgementState;
 use Fedor\MessageBus\Worker\Control\WorkerControlCommand;
@@ -19,6 +22,8 @@ use Fedor\MessageBus\Worker\Control\WorkerControlTableDefinition;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredState;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredStateType;
 use Fedor\MessageBus\Worker\Control\WorkerIdentity;
+use Fedor\MessageBus\Worker\Control\WorkerInstance;
+use Fedor\MessageBus\Worker\Control\WorkerLifecycleState;
 use Fedor\MessageBus\Worker\Control\WorkerMode;
 use Fedor\MessageBus\Worker\Control\WorkerTarget;
 use PHPUnit\Framework\TestCase;
@@ -162,7 +167,24 @@ final class PostgresWorkerControlGatewayIntegrationTest extends TestCase
             'deployment-ack',
         );
         $this->gateway->append($command, $cancellation);
-        $this->insertWorker($identity);
+        $this->gateway->registerWorker(new WorkerInstance(
+            $identity,
+            WorkerLifecycleState::Running,
+            WorkerActivityState::Idle,
+            $this->now,
+        ), $cancellation);
+        $this->gateway->registerChild(new WorkerChildInstance(
+            'child-1',
+            $identity->workerInstanceId,
+            456,
+            WorkerChildState::Running,
+            $this->now,
+            $this->now,
+            'queue-1',
+            'message-1',
+            'correlation-1',
+            'gar.import',
+        ), $cancellation);
         $this->gateway->acknowledge(new WorkerControlAcknowledgement(
             'command-ack',
             'import-worker-1',
@@ -177,12 +199,49 @@ final class PostgresWorkerControlGatewayIntegrationTest extends TestCase
             $this->now->modify('+3 seconds'),
             'already stopping',
         ), $cancellation);
+        $this->gateway->heartbeatWorker(
+            $identity->workerInstanceId,
+            WorkerLifecycleState::Stopping,
+            WorkerActivityState::Busy,
+            $this->now->modify('+4 seconds'),
+            $cancellation,
+            childrenCount: 1,
+            lastCommandId: 'command-ack',
+        );
+        $this->gateway->heartbeatChild(
+            'child-1',
+            WorkerChildState::Running,
+            $this->now->modify('+4 seconds'),
+            $cancellation,
+        );
+        $this->gateway->finishChild(
+            'child-1',
+            WorkerChildState::Succeeded,
+            $this->now->modify('+5 seconds'),
+            $cancellation,
+        );
+        $this->gateway->stopWorker(
+            $identity->workerInstanceId,
+            WorkerLifecycleState::Stopped,
+            $this->now->modify('+6 seconds'),
+            $cancellation,
+        );
 
-        $row = $this->postgres->query(
-            'SELECT state, message FROM "' . $this->tables->acknowledgementsTable . '"',
-        )->fetchRow();
-        self::assertSame('skipped', $row['state'] ?? null);
-        self::assertSame('already stopping', $row['message'] ?? null);
+        $worker = $this->gateway->getWorker($identity->workerInstanceId, $cancellation);
+        self::assertNotNull($worker);
+        self::assertSame(WorkerLifecycleState::Stopped, $worker->state);
+        self::assertSame('command-ack', $worker->lastCommandId);
+        self::assertCount(1, $this->gateway->listWorkers(
+            new WorkerTarget(workerGroup: 'imports'),
+            $cancellation,
+        ));
+        $children = $this->gateway->listChildren($identity->workerInstanceId, $cancellation);
+        self::assertCount(1, $children);
+        self::assertSame(WorkerChildState::Succeeded, $children[0]->state);
+        $acknowledgements = $this->gateway->acknowledgementsForCommand('command-ack', $cancellation);
+        self::assertCount(1, $acknowledgements);
+        self::assertSame(WorkerControlAcknowledgementState::Skipped, $acknowledgements[0]->state);
+        self::assertSame('already stopping', $acknowledgements[0]->message);
     }
 
     private function command(
@@ -218,35 +277,6 @@ final class PostgresWorkerControlGatewayIntegrationTest extends TestCase
             ['gar.import'],
             ['gar.*'],
             'worker-id-1',
-        );
-    }
-
-    private function insertWorker(WorkerIdentity $identity): void
-    {
-        $this->postgres->execute(
-            'INSERT INTO "' . $this->tables->workerInstancesTable . '" (
-                worker_instance_id, worker_id, worker_name, worker_group, host, pid, started_at,
-                mode, transport, queue, state, activity, heartbeat_at, updated_at
-            ) VALUES (
-                :worker_instance_id, :worker_id, :worker_name, :worker_group, :host, :pid, :started_at,
-                :mode, :transport, :queue, :state, :activity, :heartbeat_at, :updated_at
-            )',
-            [
-                'worker_instance_id' => $identity->workerInstanceId,
-                'worker_id' => $identity->workerId,
-                'worker_name' => $identity->workerName,
-                'worker_group' => $identity->workerGroup,
-                'host' => $identity->host,
-                'pid' => $identity->pid,
-                'started_at' => $identity->startedAt->format(DATE_ATOM),
-                'mode' => $identity->mode->value,
-                'transport' => $identity->transport,
-                'queue' => $identity->queue,
-                'state' => 'running',
-                'activity' => 'idle',
-                'heartbeat_at' => $this->now->format(DATE_ATOM),
-                'updated_at' => $this->now->format(DATE_ATOM),
-            ],
         );
     }
 

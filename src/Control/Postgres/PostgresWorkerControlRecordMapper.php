@@ -6,10 +6,18 @@ namespace Fedor\MessageBus\Worker\Control\Postgres;
 
 use DateTimeImmutable;
 use DateTimeZone;
+use Fedor\MessageBus\Worker\Control\WorkerActivityState;
+use Fedor\MessageBus\Worker\Control\WorkerChildInstance;
+use Fedor\MessageBus\Worker\Control\WorkerChildState;
+use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgement;
+use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgementState;
 use Fedor\MessageBus\Worker\Control\WorkerControlCommand;
 use Fedor\MessageBus\Worker\Control\WorkerControlCommandType;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredState;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredStateType;
+use Fedor\MessageBus\Worker\Control\WorkerIdentity;
+use Fedor\MessageBus\Worker\Control\WorkerInstance;
+use Fedor\MessageBus\Worker\Control\WorkerLifecycleState;
 use Fedor\MessageBus\Worker\Control\WorkerMode;
 use Fedor\MessageBus\Worker\Control\WorkerTarget;
 use JsonException;
@@ -51,6 +59,69 @@ final class PostgresWorkerControlRecordMapper
             $this->nullableString($row, 'correlation_id'),
             $this->boolean($row, 'override'),
             $this->boolean($row, 'active'),
+        );
+    }
+
+    /** @param array<string, mixed> $row */
+    public function worker(array $row): WorkerInstance
+    {
+        return new WorkerInstance(
+            new WorkerIdentity(
+                workerName: $this->string($row, 'worker_name'),
+                workerInstanceId: $this->string($row, 'worker_instance_id'),
+                workerGroup: $this->nullableString($row, 'worker_group'),
+                host: $this->string($row, 'host'),
+                pid: $this->integer($row, 'pid'),
+                startedAt: $this->date($this->field($row, 'started_at')),
+                mode: WorkerMode::from($this->string($row, 'mode')),
+                transport: $this->string($row, 'transport'),
+                queue: $this->string($row, 'queue'),
+                flows: $this->stringList($row, 'flows'),
+                bindingIds: $this->stringList($row, 'binding_ids'),
+                bindingPatterns: $this->stringList($row, 'binding_patterns'),
+                workerId: $this->nullableString($row, 'worker_id'),
+            ),
+            WorkerLifecycleState::from($this->string($row, 'state')),
+            WorkerActivityState::from($this->string($row, 'activity')),
+            $this->date($this->field($row, 'heartbeat_at')),
+            $this->integer($row, 'children_count'),
+            $this->nullableString($row, 'last_command_id'),
+            $this->nullableDate($this->field($row, 'last_command_at')),
+            $this->nullableDate($this->field($row, 'stopped_at')),
+            $this->nullableString($row, 'failure_message'),
+        );
+    }
+
+    /** @param array<string, mixed> $row */
+    public function child(array $row): WorkerChildInstance
+    {
+        return new WorkerChildInstance(
+            $this->string($row, 'child_instance_id'),
+            $this->string($row, 'parent_worker_instance_id'),
+            $this->integer($row, 'pid'),
+            WorkerChildState::from($this->string($row, 'state')),
+            $this->date($this->field($row, 'started_at')),
+            $this->date($this->field($row, 'heartbeat_at')),
+            $this->nullableString($row, 'queue_message_id'),
+            $this->nullableString($row, 'message_id'),
+            $this->nullableString($row, 'correlation_id'),
+            $this->nullableString($row, 'binding_id'),
+            $this->nullableDate($this->field($row, 'finished_at')),
+            $this->nullableString($row, 'failure_message'),
+        );
+    }
+
+    /** @param array<string, mixed> $row */
+    public function acknowledgement(array $row): WorkerControlAcknowledgement
+    {
+        return new WorkerControlAcknowledgement(
+            $this->string($row, 'command_id'),
+            $this->string($row, 'worker_instance_id'),
+            WorkerControlAcknowledgementState::from($this->string($row, 'state')),
+            $this->date($this->field($row, 'acknowledged_at')),
+            $this->nullableString($row, 'message'),
+            $this->nullableString($row, 'error_class'),
+            $this->nullableString($row, 'error_message'),
         );
     }
 

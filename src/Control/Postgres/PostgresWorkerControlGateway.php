@@ -8,6 +8,9 @@ use Amp\Cancellation;
 use Amp\Postgres\PostgresLink;
 use DateTimeImmutable;
 use Fedor\MessageBus\Worker\Clock\UtcSystemClock;
+use Fedor\MessageBus\Worker\Control\WorkerActivityState;
+use Fedor\MessageBus\Worker\Control\WorkerChildInstance;
+use Fedor\MessageBus\Worker\Control\WorkerChildState;
 use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgement;
 use Fedor\MessageBus\Worker\Control\WorkerControlBatch;
 use Fedor\MessageBus\Worker\Control\WorkerControlCommand;
@@ -19,6 +22,10 @@ use Fedor\MessageBus\Worker\Control\WorkerControlTableDefinition;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredState;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredStateRepositoryInterface;
 use Fedor\MessageBus\Worker\Control\WorkerIdentity;
+use Fedor\MessageBus\Worker\Control\WorkerInstance;
+use Fedor\MessageBus\Worker\Control\WorkerLifecycleState;
+use Fedor\MessageBus\Worker\Control\WorkerRegistryInterface;
+use Fedor\MessageBus\Worker\Control\WorkerStatusRepositoryInterface;
 use Fedor\MessageBus\Worker\Control\WorkerTarget;
 use JsonException;
 use Psr\Clock\ClockInterface;
@@ -27,11 +34,15 @@ use RuntimeException;
 final class PostgresWorkerControlGateway implements
     WorkerControlCommandRepositoryInterface,
     WorkerDesiredStateRepositoryInterface,
-    WorkerControlInboxInterface
+    WorkerControlInboxInterface,
+    WorkerRegistryInterface,
+    WorkerStatusRepositoryInterface
 {
     private readonly string $commandsTable;
     private readonly string $desiredStatesTable;
     private readonly string $acknowledgementsTable;
+    private readonly string $workerInstancesTable;
+    private readonly string $childInstancesTable;
     private readonly PostgresWorkerControlRecordMapper $records;
 
     public function __construct(
@@ -43,6 +54,8 @@ final class PostgresWorkerControlGateway implements
         $this->commandsTable = $this->quoteIdentifier($definition->commandsTable);
         $this->desiredStatesTable = $this->quoteIdentifier($definition->desiredStatesTable);
         $this->acknowledgementsTable = $this->quoteIdentifier($definition->acknowledgementsTable);
+        $this->workerInstancesTable = $this->quoteIdentifier($definition->workerInstancesTable);
+        $this->childInstancesTable = $this->quoteIdentifier($definition->childInstancesTable);
         $this->records = $records ?? new PostgresWorkerControlRecordMapper();
     }
 
@@ -263,6 +276,302 @@ final class PostgresWorkerControlGateway implements
         );
     }
 
+    #[\Override]
+    public function registerWorker(WorkerInstance $worker, Cancellation $cancellation): void
+    {
+        $cancellation->throwIfRequested();
+        $identity = $worker->identity;
+        $this->postgres->execute(
+            'INSERT INTO ' . $this->workerInstancesTable . ' (
+                worker_instance_id, worker_id, worker_name, worker_group, host, pid, started_at,
+                mode, transport, queue, flows, binding_ids, binding_patterns,
+                state, activity, heartbeat_at, children_count,
+                last_command_id, last_command_at, stopped_at, failure_message, updated_at
+            ) VALUES (
+                :worker_instance_id, :worker_id, :worker_name, :worker_group, :host, :pid, :started_at,
+                :mode, :transport, :queue, :flows, :binding_ids, :binding_patterns,
+                :state, :activity, :heartbeat_at, :children_count,
+                :last_command_id, :last_command_at, :stopped_at, :failure_message, :updated_at
+            )
+            ON CONFLICT (worker_instance_id) DO UPDATE SET
+                worker_id = EXCLUDED.worker_id,
+                worker_name = EXCLUDED.worker_name,
+                worker_group = EXCLUDED.worker_group,
+                host = EXCLUDED.host,
+                pid = EXCLUDED.pid,
+                started_at = EXCLUDED.started_at,
+                mode = EXCLUDED.mode,
+                transport = EXCLUDED.transport,
+                queue = EXCLUDED.queue,
+                flows = EXCLUDED.flows,
+                binding_ids = EXCLUDED.binding_ids,
+                binding_patterns = EXCLUDED.binding_patterns,
+                state = EXCLUDED.state,
+                activity = EXCLUDED.activity,
+                heartbeat_at = EXCLUDED.heartbeat_at,
+                children_count = EXCLUDED.children_count,
+                last_command_id = EXCLUDED.last_command_id,
+                last_command_at = EXCLUDED.last_command_at,
+                stopped_at = EXCLUDED.stopped_at,
+                failure_message = EXCLUDED.failure_message,
+                updated_at = EXCLUDED.updated_at',
+            [
+                'worker_instance_id' => $identity->workerInstanceId,
+                'worker_id' => $identity->workerId,
+                'worker_name' => $identity->workerName,
+                'worker_group' => $identity->workerGroup,
+                'host' => $identity->host,
+                'pid' => $identity->pid,
+                'started_at' => $this->formatDate($identity->startedAt),
+                'mode' => $identity->mode->value,
+                'transport' => $identity->transport,
+                'queue' => $identity->queue,
+                'flows' => $this->json($identity->flows),
+                'binding_ids' => $this->json($identity->bindingIds),
+                'binding_patterns' => $this->json($identity->bindingPatterns),
+                'state' => $worker->state->value,
+                'activity' => $worker->activity->value,
+                'heartbeat_at' => $this->formatDate($worker->heartbeatAt),
+                'children_count' => $worker->childrenCount,
+                'last_command_id' => $worker->lastCommandId,
+                'last_command_at' => $this->nullableDate($worker->lastCommandAt),
+                'stopped_at' => $this->nullableDate($worker->stoppedAt),
+                'failure_message' => $worker->failureMessage,
+                'updated_at' => $this->formatDate($worker->heartbeatAt),
+            ],
+        );
+    }
+
+    #[\Override]
+    public function heartbeatWorker(
+        string $workerInstanceId,
+        WorkerLifecycleState $state,
+        WorkerActivityState $activity,
+        DateTimeImmutable $heartbeatAt,
+        Cancellation $cancellation,
+        int $childrenCount = 0,
+        ?string $lastCommandId = null,
+    ): void {
+        $cancellation->throwIfRequested();
+        $this->postgres->execute(
+            'UPDATE ' . $this->workerInstancesTable . '
+             SET state = :state,
+                 activity = :activity,
+                 heartbeat_at = :heartbeat_at,
+                 children_count = :children_count,
+                 last_command_id = COALESCE(:last_command_id, last_command_id),
+                 last_command_at = CASE
+                     WHEN CAST(:last_command_id AS TEXT) IS NULL THEN last_command_at
+                     ELSE :heartbeat_at
+                 END,
+                 updated_at = :heartbeat_at
+             WHERE worker_instance_id = :worker_instance_id',
+            [
+                'worker_instance_id' => $workerInstanceId,
+                'state' => $state->value,
+                'activity' => $activity->value,
+                'heartbeat_at' => $this->formatDate($heartbeatAt),
+                'children_count' => $childrenCount,
+                'last_command_id' => $lastCommandId,
+            ],
+        );
+    }
+
+    #[\Override]
+    public function stopWorker(
+        string $workerInstanceId,
+        WorkerLifecycleState $state,
+        DateTimeImmutable $stoppedAt,
+        Cancellation $cancellation,
+        ?string $failureMessage = null,
+    ): void {
+        $cancellation->throwIfRequested();
+        $this->postgres->execute(
+            'UPDATE ' . $this->workerInstancesTable . '
+             SET state = :state,
+                 activity = :activity,
+                 heartbeat_at = :stopped_at,
+                 stopped_at = :stopped_at,
+                 failure_message = :failure_message,
+                 updated_at = :stopped_at
+             WHERE worker_instance_id = :worker_instance_id',
+            [
+                'worker_instance_id' => $workerInstanceId,
+                'state' => $state->value,
+                'activity' => WorkerActivityState::Idle->value,
+                'stopped_at' => $this->formatDate($stoppedAt),
+                'failure_message' => $failureMessage,
+            ],
+        );
+    }
+
+    #[\Override]
+    public function registerChild(WorkerChildInstance $child, Cancellation $cancellation): void
+    {
+        $cancellation->throwIfRequested();
+        $this->postgres->execute(
+            'INSERT INTO ' . $this->childInstancesTable . ' (
+                child_instance_id, parent_worker_instance_id, pid, state, started_at, heartbeat_at,
+                queue_message_id, message_id, correlation_id, binding_id,
+                finished_at, failure_message, updated_at
+            ) VALUES (
+                :child_instance_id, :parent_worker_instance_id, :pid, :state, :started_at, :heartbeat_at,
+                :queue_message_id, :message_id, :correlation_id, :binding_id,
+                :finished_at, :failure_message, :updated_at
+            )
+            ON CONFLICT (child_instance_id) DO UPDATE SET
+                parent_worker_instance_id = EXCLUDED.parent_worker_instance_id,
+                pid = EXCLUDED.pid,
+                state = EXCLUDED.state,
+                started_at = EXCLUDED.started_at,
+                heartbeat_at = EXCLUDED.heartbeat_at,
+                queue_message_id = EXCLUDED.queue_message_id,
+                message_id = EXCLUDED.message_id,
+                correlation_id = EXCLUDED.correlation_id,
+                binding_id = EXCLUDED.binding_id,
+                finished_at = EXCLUDED.finished_at,
+                failure_message = EXCLUDED.failure_message,
+                updated_at = EXCLUDED.updated_at',
+            [
+                'child_instance_id' => $child->childInstanceId,
+                'parent_worker_instance_id' => $child->parentWorkerInstanceId,
+                'pid' => $child->pid,
+                'state' => $child->state->value,
+                'started_at' => $this->formatDate($child->startedAt),
+                'heartbeat_at' => $this->formatDate($child->heartbeatAt),
+                'queue_message_id' => $child->queueMessageId,
+                'message_id' => $child->messageId,
+                'correlation_id' => $child->correlationId,
+                'binding_id' => $child->bindingId,
+                'finished_at' => $this->nullableDate($child->finishedAt),
+                'failure_message' => $child->failureMessage,
+                'updated_at' => $this->formatDate($child->heartbeatAt),
+            ],
+        );
+    }
+
+    #[\Override]
+    public function heartbeatChild(
+        string $childInstanceId,
+        WorkerChildState $state,
+        DateTimeImmutable $heartbeatAt,
+        Cancellation $cancellation,
+    ): void {
+        $cancellation->throwIfRequested();
+        $this->postgres->execute(
+            'UPDATE ' . $this->childInstancesTable . '
+             SET state = :state,
+                 heartbeat_at = :heartbeat_at,
+                 updated_at = :heartbeat_at
+             WHERE child_instance_id = :child_instance_id',
+            [
+                'child_instance_id' => $childInstanceId,
+                'state' => $state->value,
+                'heartbeat_at' => $this->formatDate($heartbeatAt),
+            ],
+        );
+    }
+
+    #[\Override]
+    public function finishChild(
+        string $childInstanceId,
+        WorkerChildState $state,
+        DateTimeImmutable $finishedAt,
+        Cancellation $cancellation,
+        ?string $failureMessage = null,
+    ): void {
+        $cancellation->throwIfRequested();
+        $this->postgres->execute(
+            'UPDATE ' . $this->childInstancesTable . '
+             SET state = :state,
+                 heartbeat_at = :finished_at,
+                 finished_at = :finished_at,
+                 failure_message = :failure_message,
+                 updated_at = :finished_at
+             WHERE child_instance_id = :child_instance_id',
+            [
+                'child_instance_id' => $childInstanceId,
+                'state' => $state->value,
+                'finished_at' => $this->formatDate($finishedAt),
+                'failure_message' => $failureMessage,
+            ],
+        );
+    }
+
+    #[\Override]
+    public function getWorker(
+        string $workerInstanceId,
+        Cancellation $cancellation,
+    ): ?WorkerInstance {
+        $cancellation->throwIfRequested();
+        $row = $this->postgres->execute(
+            'SELECT * FROM ' . $this->workerInstancesTable . '
+             WHERE worker_instance_id = :worker_instance_id',
+            ['worker_instance_id' => $workerInstanceId],
+        )->fetchRow();
+
+        return $row === null ? null : $this->records->worker($row);
+    }
+
+    #[\Override]
+    public function listWorkers(WorkerTarget $target, Cancellation $cancellation): array
+    {
+        $cancellation->throwIfRequested();
+        $result = $this->postgres->query(
+            'SELECT * FROM ' . $this->workerInstancesTable . ' ORDER BY started_at ASC',
+        );
+        $workers = [];
+        foreach ($result as $row) {
+            $cancellation->throwIfRequested();
+            $worker = $this->records->worker($row);
+            if ($target->matches($worker->identity)) {
+                $workers[] = $worker;
+            }
+        }
+
+        return $workers;
+    }
+
+    #[\Override]
+    public function listChildren(string $workerInstanceId, Cancellation $cancellation): array
+    {
+        $cancellation->throwIfRequested();
+        $result = $this->postgres->execute(
+            'SELECT * FROM ' . $this->childInstancesTable . '
+             WHERE parent_worker_instance_id = :parent_worker_instance_id
+             ORDER BY started_at ASC',
+            ['parent_worker_instance_id' => $workerInstanceId],
+        );
+        $children = [];
+        foreach ($result as $row) {
+            $cancellation->throwIfRequested();
+            $children[] = $this->records->child($row);
+        }
+
+        return $children;
+    }
+
+    #[\Override]
+    public function acknowledgementsForCommand(
+        string $commandId,
+        Cancellation $cancellation,
+    ): array {
+        $cancellation->throwIfRequested();
+        $result = $this->postgres->execute(
+            'SELECT * FROM ' . $this->acknowledgementsTable . '
+             WHERE command_id = :command_id
+             ORDER BY acknowledged_at ASC',
+            ['command_id' => $commandId],
+        );
+        $acknowledgements = [];
+        foreach ($result as $row) {
+            $cancellation->throwIfRequested();
+            $acknowledgements[] = $this->records->acknowledgement($row);
+        }
+
+        return $acknowledgements;
+    }
+
     private function existingCommand(
         WorkerControlCommand $command,
         Cancellation $cancellation,
@@ -442,6 +751,11 @@ final class PostgresWorkerControlGateway implements
     private function formatDate(DateTimeImmutable $date): string
     {
         return $date->format(DATE_ATOM);
+    }
+
+    private function nullableDate(?DateTimeImmutable $date): ?string
+    {
+        return $date?->format(DATE_ATOM);
     }
 
     private function quoteIdentifier(string $identifier): string

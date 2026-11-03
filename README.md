@@ -5,8 +5,8 @@ Optional operational worker runtime for
 
 > Status: pre-release `0.1.0`. PostgreSQL consumption, durable transitions, the
 > AMPHP runner with per-job scopes, and the PostgreSQL worker control storage
-> are implemented. Automatic command application and the executable are not
-> ready for application use.
+> are implemented. The runner applies durable worker-control commands. The
+> queued-binding adapter and executable are not ready for application use.
 
 ## Responsibility Boundary
 
@@ -20,9 +20,9 @@ The worker package owns:
 - v6-compatible worker control commands, desired-state targeting, worker/child
   registry, acknowledgements, and their AMPHP PostgreSQL gateway.
 
-The package will also own command application in the runner, the Symfony
-Console executable, and optional process/signal adapters. Those runtime layers
-are not implemented yet.
+The package will also own the exact queued-binding adapter, Symfony Console
+executable, and optional process/signal adapters. Those runtime layers are not
+implemented yet.
 
 Producer, status, cancellation, common queue schema, message registry, and local
 dispatch remain in the core package. The dependency direction is always worker
@@ -82,10 +82,11 @@ expiring one-shot commands. Every storage operation accepts AMPHP cancellation
 at safe I/O boundaries.
 
 The schema generator owns the complete worker-control table set so later
-process adapters do not require an incompatible migration. The current runner
-does not poll or apply these commands yet. See the
+process adapters do not require an incompatible migration. `QueueWorkerRunner`
+registers its identity, polls and acknowledges commands, heartbeats status, and
+records its final lifecycle. See the
 [worker control reference](docs/reference/worker-control.md) for the exact
-contracts, schema boundary, cursor behavior, and current integration limit.
+contracts, schema boundary, cursor behavior, and runtime semantics.
 
 ## Development
 

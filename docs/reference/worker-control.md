@@ -91,6 +91,29 @@ write replaces state, time, message, and error details. Status readers can list
 workers by `WorkerTarget`, list children for a worker, and list acknowledgements
 for a command.
 
+## Runner integration
+
+Pass an optional `WorkerControlRuntime` to `QueueWorkerRunner`. The runner then
+registers a single-mode worker identity before its first claim, polls the inbox
+between jobs and from the concurrent job monitor, heartbeats idle/busy state,
+acknowledges applied commands, and records its final lifecycle.
+
+Runtime behavior preserves the v6 state machine:
+
+| Command/state | Runner behavior |
+| --- | --- |
+| pause / desired paused | Stops new claims and keeps polling for resume or a terminal command |
+| resume / desired resumed | Returns to claims unless a terminal command was already observed |
+| drain | Lets the current job finish, then exits |
+| stop | Lets the current job finish, then exits |
+| kill | Cancels the cooperative current handler; retry/reject still follows its persisted attempt budget |
+| restart | Lets the current job finish, records `restarting`, and returns the configured restart exit code |
+
+`QueueWorkerRunnerOptions` supplies worker name/group/instance/host selectors,
+control polling interval, and restart exit code. Supplying no
+`WorkerControlRuntime` preserves the queue-only runner behavior and performs no
+control-plane I/O.
+
 ## Cancellation and current runtime limit
 
 Every storage method accepts `Amp\Cancellation` and checks it before AMPHP I/O
@@ -98,7 +121,12 @@ and while consuming multi-row results. AMPHP PostgreSQL 2.x does not cancel an
 already-running statement, so an in-flight query is allowed to reach a definite
 database result before cancellation is observed at the next safe boundary.
 
-The current `QueueWorkerRunner` does not yet call the control inbox, update the
-worker registry, or translate control commands into process actions. Until that
-integration slice is complete, applications may issue and inspect commands but
-must not assume the runner applies them automatically.
+Control kill, process shutdown, durable queue cancellation, and lease loss are
+kept as distinct causes. Kill follows the v6 terminated-job retry/reject
+semantics; durable queue cancellation persists `cancelled`; lease loss prevents
+the stale worker from writing a transition.
+
+The current runner is cooperative and single-process. It cannot interrupt
+CPU-bound code that never suspends, and it does not send operating-system
+signals. Signal translation and a process-supervisor executable remain optional
+later adapters.

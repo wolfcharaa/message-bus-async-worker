@@ -79,3 +79,20 @@ window; the current handler may still finish and be acknowledged.
 Signal and console adapters should translate their stop request into an AMPHP
 `DeferredCancellation`. They remain separate optional process concerns and are
 not part of this runner slice.
+
+## Worker control runtime
+
+An optional `WorkerControlRuntime` enables the v6 worker control state machine
+without changing queue-only composition. The runner registers a single-mode
+worker, polls commands and desired state before claims and during suspended job
+handling, acknowledges applied commands, heartbeats idle/busy state, and writes
+the final stopped, failed, or restarting lifecycle.
+
+Pause and resume affect future claims. Drain, stop, and restart allow the
+current job to finish. Kill cancels the cooperative handler and settles the job
+through its existing retry/reject budget. Restart exposes
+`QueueWorkerRunResult::exitCode`; the later executable is responsible for
+returning that code to a process supervisor.
+
+See the [worker control reference](worker-control.md) for targeting, cursor,
+schema, registry, and acknowledgement contracts.

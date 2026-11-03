@@ -5,8 +5,9 @@ Optional operational worker runtime for
 
 > Status: pre-release `0.1.0`. PostgreSQL consumption, durable transitions, the
 > AMPHP runner with per-job scopes, and the PostgreSQL worker control storage
-> are implemented. The runner applies durable worker-control commands. The
-> queued-binding adapter and executable are not ready for application use.
+> are implemented. The runner applies durable worker-control commands and the
+> exact queued-binding adapter is available. The executable is not ready for
+> application use.
 
 ## Responsibility Boundary
 
@@ -18,11 +19,12 @@ The worker package owns:
 - the AMPHP-native consumer loop, per-job service scope, heartbeat monitor, and
   graceful process cancellation;
 - v6-compatible worker control commands, desired-state targeting, worker/child
-  registry, acknowledgements, and their AMPHP PostgreSQL gateway.
+  registry, acknowledgements, and their AMPHP PostgreSQL gateway;
+- job-scoped envelope deserialization and execution of the exact binding stored
+  in each queue row.
 
-The package will also own the exact queued-binding adapter, Symfony Console
-executable, and optional process/signal adapters. Those runtime layers are not
-implemented yet.
+The package will also own the Symfony Console executable and optional
+process/signal adapters. Those runtime layers are not implemented yet.
 
 Producer, status, cancellation, common queue schema, message registry, and local
 dispatch remain in the core package. The dependency direction is always worker
@@ -71,6 +73,13 @@ non-retryable failures persist `failed`; successful work is acknowledged only
 after the job scope has completed. Final transitions use an independent
 cancellation phase so process shutdown cannot interrupt ack/retry halfway.
 See the [worker runner reference](docs/reference/worker-runner.md).
+
+`MessageBusQueueWorker` is the built-in `QueueWorkerInterface` adapter. It
+deserializes the stored envelope, overwrites its runtime binding with the
+authoritative `QueueMessage::bindingId`, and calls the core
+`BindingEnvelopeExecutorInterface` with the resolver and cancellation of the
+current job scope. The core executor forces local sequential execution, so a
+consumed async job cannot be enqueued again.
 
 ## Worker Control
 

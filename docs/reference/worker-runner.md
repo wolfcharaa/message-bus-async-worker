@@ -18,11 +18,13 @@ public function handle(
 ): void;
 ```
 
-The adapter is responsible for deserializing the embedded core
-`SerializedEnvelope` and executing exactly `QueueMessage::bindingId`. This
-keeps worker orchestration independent from an application container while
-allowing Thesis DIC or another lifecycle adapter to create one message scope.
-The scope is disposed once with the original handler error, if any.
+`MessageBusQueueWorker` is the built-in adapter. It deserializes the embedded
+core `SerializedEnvelope`, applies the authoritative
+`QueueMessage::bindingId`, and invokes `BindingEnvelopeExecutorInterface` with
+the current scope resolver and cancellation. The core `MessageBus` implements
+that contract by forcing the one binding through the local sequential pipeline;
+it does not invoke the async queue strategy again. The scope is disposed once
+with the original handler error, if any.
 
 ## Concurrent lease monitor
 

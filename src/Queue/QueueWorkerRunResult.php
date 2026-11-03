@@ -13,6 +13,7 @@ final readonly class QueueWorkerRunResult
         public int $rejected = 0,
         public int $cancelled = 0,
         public int $leaseLost = 0,
+        public ?int $exitCode = null,
     ) {
     }
 }

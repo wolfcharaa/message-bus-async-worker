@@ -24,8 +24,26 @@ use Fedor\MessageBus\Worker\Queue\QueueWorkerInterface;
 use Fedor\MessageBus\Worker\Queue\QueueWorkerRunner;
 use Fedor\MessageBus\Worker\Queue\QueueWorkerRunnerOptions;
 use Fedor\MessageBus\Worker\Queue\ReceivedQueueMessage;
+use Fedor\MessageBus\Worker\Control\WorkerActivityState;
+use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgement;
+use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgementState;
+use Fedor\MessageBus\Worker\Control\WorkerControlBatch;
+use Fedor\MessageBus\Worker\Control\WorkerControlCommand;
+use Fedor\MessageBus\Worker\Control\WorkerControlCommandRepositoryInterface;
+use Fedor\MessageBus\Worker\Control\WorkerControlCommandType;
+use Fedor\MessageBus\Worker\Control\WorkerControlCursor;
+use Fedor\MessageBus\Worker\Control\WorkerControlInboxInterface;
+use Fedor\MessageBus\Worker\Control\WorkerControlRuntime;
+use Fedor\MessageBus\Worker\Control\WorkerControlServiceInterface;
+use Fedor\MessageBus\Worker\Control\WorkerDesiredStateRepositoryInterface;
+use Fedor\MessageBus\Worker\Control\WorkerInstance;
+use Fedor\MessageBus\Worker\Control\WorkerLifecycleState;
+use Fedor\MessageBus\Worker\Control\WorkerRegistryInterface;
+use Fedor\MessageBus\Worker\Control\WorkerStatusRepositoryInterface;
+use Fedor\MessageBus\Worker\Control\WorkerTarget;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use Psr\Clock\ClockInterface;
 use RuntimeException;
 use Throwable;
 
@@ -217,6 +235,116 @@ final class QueueWorkerRunnerTest extends TestCase
         new QueueWorkerRunnerOptions(heartbeatIntervalMilliseconds: 0);
     }
 
+    public function testControlStopIsAcknowledgedBeforeTheRunnerClaimsAJob(): void
+    {
+        $now = new DateTimeImmutable('2026-11-03T10:00:00+00:00');
+        $command = self::controlCommand('command-stop', WorkerControlCommandType::Stop, $now);
+        $commands = $this->createMock(WorkerControlCommandRepositoryInterface::class);
+        $commands->expects(self::once())
+            ->method('acknowledge')
+            ->with(self::callback(static fn (WorkerControlAcknowledgement $acknowledgement): bool =>
+                $acknowledgement->commandId === 'command-stop'
+                && $acknowledgement->state === WorkerControlAcknowledgementState::Applied));
+        $inbox = $this->createMock(WorkerControlInboxInterface::class);
+        $inbox->expects(self::once())
+            ->method('receive')
+            ->willReturn(new WorkerControlBatch(
+                [$command],
+                new WorkerControlCursor('command-stop'),
+            ));
+        $registry = $this->createMock(WorkerRegistryInterface::class);
+        $registry->expects(self::once())
+            ->method('registerWorker')
+            ->with(self::callback(static fn (WorkerInstance $worker): bool =>
+                $worker->identity->workerInstanceId === 'worker-control-stop'
+                && $worker->state === WorkerLifecycleState::Starting));
+        $registry->expects(self::once())
+            ->method('heartbeatWorker')
+            ->with(
+                'worker-control-stop',
+                WorkerLifecycleState::Stopping,
+                WorkerActivityState::Idle,
+            );
+        $registry->expects(self::once())
+            ->method('stopWorker')
+            ->with('worker-control-stop', WorkerLifecycleState::Stopped);
+        $runtime = $this->controlRuntime($commands, $inbox, $registry);
+        $consumer = new RunnerConsumer([self::message('job-must-not-start')]);
+
+        $result = (new QueueWorkerRunner(
+            $consumer,
+            new RunnerLeaseControl(),
+            new RunnerScopeFactory(new RunnerWorker(static function (): void {})),
+            $runtime,
+            new RunnerFrozenClock($now),
+        ))->run(
+            self::consumerOptions(),
+            new QueueWorkerRunnerOptions(
+                maxMessages: 1,
+                stopWhenEmpty: true,
+                heartbeatIntervalMilliseconds: 5,
+                cancellationPollIntervalMilliseconds: 5,
+                workerInstanceId: 'worker-control-stop',
+                controlPollIntervalMilliseconds: 1,
+            ),
+        );
+
+        self::assertSame(0, $result->handled);
+        self::assertSame(0, $consumer->claims);
+    }
+
+    public function testControlKillCancelsCurrentJobAndUsesRetryBudget(): void
+    {
+        $now = new DateTimeImmutable('2026-11-03T10:00:00+00:00');
+        $kill = self::controlCommand('command-kill', WorkerControlCommandType::Kill, $now);
+        $polls = 0;
+        $inbox = $this->createStub(WorkerControlInboxInterface::class);
+        $inbox->method('receive')->willReturnCallback(
+            static function () use (&$polls, $kill): WorkerControlBatch {
+                ++$polls;
+
+                return $polls === 1
+                    ? new WorkerControlBatch([], new WorkerControlCursor())
+                    : new WorkerControlBatch([$kill], new WorkerControlCursor('command-kill'));
+            },
+        );
+        $commands = $this->createMock(WorkerControlCommandRepositoryInterface::class);
+        $commands->expects(self::once())->method('acknowledge');
+        $runtime = $this->controlRuntime(
+            $commands,
+            $inbox,
+            $this->createStub(WorkerRegistryInterface::class),
+        );
+        $consumer = new RunnerConsumer([self::message('job-killed')]);
+        $worker = new RunnerWorker(static function (
+            ReceivedQueueMessage $message,
+            Cancellation $cancellation,
+        ): void {
+            delay(1, cancellation: $cancellation);
+        });
+
+        $result = (new QueueWorkerRunner(
+            $consumer,
+            new RunnerLeaseControl(),
+            new RunnerScopeFactory($worker),
+            $runtime,
+            new RunnerFrozenClock($now),
+        ))->run(
+            self::consumerOptions(),
+            new QueueWorkerRunnerOptions(
+                maxMessages: 1,
+                heartbeatIntervalMilliseconds: 5,
+                cancellationPollIntervalMilliseconds: 5,
+                workerInstanceId: 'worker-control-kill',
+                controlPollIntervalMilliseconds: 1,
+            ),
+        );
+
+        self::assertSame(1, $result->handled);
+        self::assertSame(1, $result->retried);
+        self::assertSame(['retry:job-killed'], $consumer->transitions);
+    }
+
     private static function consumerOptions(): ConsumerOptions
     {
         return new ConsumerOptions('postgres', 'messages', workerId: 'worker-1');
@@ -249,6 +377,35 @@ final class QueueWorkerRunnerTest extends TestCase
             ),
             $attempts,
             'worker-1',
+        );
+    }
+
+    private static function controlCommand(
+        string $id,
+        WorkerControlCommandType $type,
+        DateTimeImmutable $now,
+    ): WorkerControlCommand {
+        return new WorkerControlCommand(
+            $id,
+            $type,
+            WorkerTarget::all(),
+            $now,
+            expiresAt: $type->isOneShot() ? $now->modify('+5 minutes') : null,
+        );
+    }
+
+    private function controlRuntime(
+        WorkerControlCommandRepositoryInterface $commands,
+        WorkerControlInboxInterface $inbox,
+        WorkerRegistryInterface $registry,
+    ): WorkerControlRuntime {
+        return new WorkerControlRuntime(
+            $this->createStub(WorkerControlServiceInterface::class),
+            $commands,
+            $this->createStub(WorkerDesiredStateRepositoryInterface::class),
+            $registry,
+            $this->createStub(WorkerStatusRepositoryInterface::class),
+            $inbox,
         );
     }
 }
@@ -401,4 +558,16 @@ final readonly class RunnerScope implements ServiceScopeInterface
 
 final class RunnerNonRetryableFailure extends RuntimeException implements NonRetryableMessageExceptionInterface
 {
+}
+
+final readonly class RunnerFrozenClock implements ClockInterface
+{
+    public function __construct(private DateTimeImmutable $now)
+    {
+    }
+
+    public function now(): DateTimeImmutable
+    {
+        return $this->now;
+    }
 }

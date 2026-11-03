@@ -18,6 +18,12 @@ final readonly class QueueWorkerRunnerOptions
         public int $heartbeatIntervalMilliseconds = 10_000,
         public int $cancellationPollIntervalMilliseconds = 500,
         public int $gracefulShutdownTimeoutSeconds = 30,
+        public ?string $workerName = null,
+        public ?string $workerGroup = null,
+        public ?string $workerInstanceId = null,
+        public ?string $host = null,
+        public int $controlPollIntervalMilliseconds = 1_000,
+        public int $restartExitCode = 75,
     ) {
         self::positiveOrNull($this->maxMessages, 'Maximum messages');
         self::positiveOrNull($this->maxRuntimeSeconds, 'Maximum runtime');
@@ -35,6 +41,9 @@ final readonly class QueueWorkerRunnerOptions
         }
         if ($this->gracefulShutdownTimeoutSeconds < 1) {
             throw new InvalidArgumentException('Graceful shutdown timeout must be positive.');
+        }
+        if ($this->controlPollIntervalMilliseconds < 1) {
+            throw new InvalidArgumentException('Control poll interval must be positive.');
         }
     }
 

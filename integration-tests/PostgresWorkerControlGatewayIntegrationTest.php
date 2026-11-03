@@ -10,6 +10,7 @@ use Amp\Postgres\PostgresConnectionPool;
 use DateTimeImmutable;
 use Fedor\MessageBus\Worker\Control\Postgres\PostgresWorkerControlGateway;
 use Fedor\MessageBus\Worker\Control\Postgres\PostgresWorkerControlSchemaGenerator;
+use Fedor\MessageBus\Worker\Control\DefaultWorkerControlService;
 use Fedor\MessageBus\Worker\Control\WorkerActivityState;
 use Fedor\MessageBus\Worker\Control\WorkerChildInstance;
 use Fedor\MessageBus\Worker\Control\WorkerChildState;
@@ -18,6 +19,8 @@ use Fedor\MessageBus\Worker\Control\WorkerControlAcknowledgementState;
 use Fedor\MessageBus\Worker\Control\WorkerControlCommand;
 use Fedor\MessageBus\Worker\Control\WorkerControlCommandType;
 use Fedor\MessageBus\Worker\Control\WorkerControlCursor;
+use Fedor\MessageBus\Worker\Control\WorkerControlRuntime;
+use Fedor\MessageBus\Worker\Control\WorkerControlSession;
 use Fedor\MessageBus\Worker\Control\WorkerControlTableDefinition;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredState;
 use Fedor\MessageBus\Worker\Control\WorkerDesiredStateType;
@@ -242,6 +245,51 @@ final class PostgresWorkerControlGatewayIntegrationTest extends TestCase
         self::assertCount(1, $acknowledgements);
         self::assertSame(WorkerControlAcknowledgementState::Skipped, $acknowledgements[0]->state);
         self::assertSame('already stopping', $acknowledgements[0]->message);
+    }
+
+    public function testControlSessionPersistsRunnerLifecycleAndAcknowledgement(): void
+    {
+        $cancellation = new NullCancellation();
+        $command = $this->command(
+            'command-session-stop',
+            WorkerTarget::all(),
+            'deployment-session-stop',
+        );
+        $this->gateway->append($command, $cancellation);
+        $service = new DefaultWorkerControlService($this->gateway, $this->gateway);
+        $runtime = new WorkerControlRuntime(
+            $service,
+            $this->gateway,
+            $this->gateway,
+            $this->gateway,
+            $this->gateway,
+            $this->gateway,
+        );
+        $session = new WorkerControlSession(
+            $runtime,
+            $this->identity(),
+            new WorkerControlFrozenClock($this->now),
+        );
+
+        $session->start($cancellation);
+        $session->poll($cancellation);
+        $session->heartbeat(WorkerActivityState::Idle, $cancellation);
+
+        self::assertTrue($session->shouldStop());
+        self::assertSame(WorkerLifecycleState::Stopping, $session->lifecycle());
+
+        $session->stop($cancellation);
+
+        $worker = $this->gateway->getWorker('import-worker-1', $cancellation);
+        self::assertNotNull($worker);
+        self::assertSame(WorkerLifecycleState::Stopped, $worker->state);
+        self::assertSame('command-session-stop', $worker->lastCommandId);
+        $acknowledgements = $this->gateway->acknowledgementsForCommand(
+            'command-session-stop',
+            $cancellation,
+        );
+        self::assertCount(1, $acknowledgements);
+        self::assertSame(WorkerControlAcknowledgementState::Applied, $acknowledgements[0]->state);
     }
 
     private function command(

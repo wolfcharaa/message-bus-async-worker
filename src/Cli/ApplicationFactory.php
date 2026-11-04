@@ -18,40 +18,40 @@ final class ApplicationFactory
     {
         $bootstrapResolver ??= new BootstrapResolver();
         $application = new Application('message-bus-async-worker');
-        $application->add(new WorkerRunCommand($bootstrapResolver));
-        $application->add(new WorkerControlCommand($bootstrapResolver));
-        $application->add(new WorkerControlActionCommand(
+        $application->addCommand(new WorkerRunCommand($bootstrapResolver));
+        $application->addCommand(new WorkerControlCommand($bootstrapResolver));
+        $application->addCommand(new WorkerControlActionCommand(
             WorkerControlCommandType::Pause,
             'worker:pause',
             $bootstrapResolver,
         ));
-        $application->add(new WorkerControlActionCommand(
+        $application->addCommand(new WorkerControlActionCommand(
             WorkerControlCommandType::Resume,
             'worker:resume',
             $bootstrapResolver,
         ));
-        $application->add(new WorkerControlActionCommand(
+        $application->addCommand(new WorkerControlActionCommand(
             WorkerControlCommandType::Drain,
             'worker:drain',
             $bootstrapResolver,
         ));
-        $application->add(new WorkerControlActionCommand(
+        $application->addCommand(new WorkerControlActionCommand(
             WorkerControlCommandType::Stop,
             'worker:stop',
             $bootstrapResolver,
         ));
-        $application->add(new WorkerControlActionCommand(
+        $application->addCommand(new WorkerControlActionCommand(
             WorkerControlCommandType::Kill,
             'worker:kill',
             $bootstrapResolver,
         ));
-        $application->add(new WorkerControlActionCommand(
+        $application->addCommand(new WorkerControlActionCommand(
             WorkerControlCommandType::Restart,
             'worker:restart',
             $bootstrapResolver,
         ));
-        $application->add(new WorkerStatusCommand($bootstrapResolver));
-        $application->add(new WorkerPostgresSchemaCommand());
+        $application->addCommand(new WorkerStatusCommand($bootstrapResolver));
+        $application->addCommand(new WorkerPostgresSchemaCommand());
 
         return $application;
     }

@@ -22,8 +22,8 @@ The worker package owns:
   registry, acknowledgements, and their AMPHP PostgreSQL gateway;
 - job-scoped envelope deserialization and execution of the exact binding stored
   in each queue row;
-- the application-owned worker bootstrap contract, Symfony Console executable,
-  and optional PCNTL-to-AMPHP cancellation adapter.
+- the application-owned direct or managed worker bootstrap contract, Symfony
+  Console executable, and optional PCNTL-to-AMPHP cancellation adapter.
 
 Producer, status, cancellation, common queue schema, message registry, and local
 dispatch remain in the core package. The dependency direction is always worker
@@ -101,8 +101,11 @@ contracts, schema boundary, cursor behavior, and runtime semantics.
 ## Worker Executable
 
 `vendor/bin/message-bus-worker` is a separate application root for worker
-processes. The host application provides a PHP bootstrap returning
-`Fedor\MessageBus\Worker\Runtime\WorkerRuntime`; the package never imports an
+processes. The host application provides a PHP bootstrap returning either a
+direct `Fedor\MessageBus\Worker\Runtime\WorkerRuntime` or the recommended
+`WorkerRuntimeProviderInterface` for container-managed lifecycle. CLI commands
+run entirely inside the provider callback, so application scopes and resources
+can be disposed after success or failure. The package never imports an
 application container automatically.
 
 ```bash

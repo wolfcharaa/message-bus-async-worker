@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fedor\MessageBus\Worker\Tests;
 
 use Amp\Cancellation;
+use Closure;
 use DateTimeImmutable;
 use Fedor\MessageBus\Service\ServiceReference;
 use Fedor\MessageBus\Service\ServiceScopeFactoryInterface;
@@ -38,6 +39,7 @@ use Fedor\MessageBus\Worker\Queue\QueueLeaseControlInterface;
 use Fedor\MessageBus\Worker\Queue\QueueWorkerRunner;
 use Fedor\MessageBus\Worker\Queue\ReceivedQueueMessage;
 use Fedor\MessageBus\Worker\Runtime\WorkerRuntime;
+use Fedor\MessageBus\Worker\Runtime\WorkerRuntimeProviderInterface;
 use LogicException;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -47,10 +49,12 @@ use Throwable;
 final class WorkerCliTest extends TestCase
 {
     private static ?WorkerRuntime $bootstrapRuntime = null;
+    private static ?WorkerRuntimeProviderInterface $bootstrapProvider = null;
 
     protected function tearDown(): void
     {
         self::$bootstrapRuntime = null;
+        self::$bootstrapProvider = null;
     }
 
     public function testApplicationExposesTheV6WorkerCommandSurface(): void
@@ -90,6 +94,25 @@ final class WorkerCliTest extends TestCase
             'handled=0 succeeded=0 retried=0 rejected=0 cancelled=0 lease_lost=0',
             $tester->getDisplay(),
         );
+    }
+
+    public function testRunCommandExecutesInsideManagedRuntimeProvider(): void
+    {
+        $provider = new CliManagedRuntimeProvider(self::runtime());
+        self::$bootstrapProvider = $provider;
+        $tester = new CommandTester(new WorkerRunCommand(new BootstrapResolver()));
+
+        $exitCode = $tester->execute([
+            '--bootstrap' => self::managedBootstrapPath(),
+            '--transport' => 'postgres',
+            '--queue' => 'messages',
+            '--stop-when-empty' => true,
+        ]);
+
+        self::assertSame(0, $exitCode);
+        self::assertSame(1, $provider->runs);
+        self::assertFalse($provider->active);
+        self::assertTrue($provider->closed);
     }
 
     public function testControlAliasBuildsTargetAndAuditRequest(): void
@@ -182,14 +205,34 @@ final class WorkerCliTest extends TestCase
         (new BootstrapResolver())->resolve(__DIR__ . '/Fixture/invalid-worker-bootstrap.php');
     }
 
+    public function testManagedBootstrapCannotEscapeItsLifecycleThroughResolve(): void
+    {
+        self::$bootstrapProvider = new CliManagedRuntimeProvider(self::runtime());
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('cannot be resolved outside its lifecycle');
+
+        (new BootstrapResolver())->resolve(self::managedBootstrapPath());
+    }
+
     public static function bootstrapRuntime(): WorkerRuntime
     {
         return self::$bootstrapRuntime ?? throw new LogicException('CLI test bootstrap runtime is not prepared.');
     }
 
+    public static function bootstrapProvider(): WorkerRuntimeProviderInterface
+    {
+        return self::$bootstrapProvider ?? throw new LogicException('CLI test bootstrap provider is not prepared.');
+    }
+
     private static function bootstrapPath(): string
     {
         return __DIR__ . '/Fixture/worker-bootstrap.php';
+    }
+
+    private static function managedBootstrapPath(): string
+    {
+        return __DIR__ . '/Fixture/managed-worker-bootstrap.php';
     }
 
     private static function runtime(?WorkerControlRuntime $control = null): WorkerRuntime
@@ -218,6 +261,30 @@ final class WorkerCliTest extends TestCase
             $this->createStub(WorkerControlInboxInterface::class),
             $statusService,
         );
+    }
+}
+
+final class CliManagedRuntimeProvider implements WorkerRuntimeProviderInterface
+{
+    public int $runs = 0;
+    public bool $active = false;
+    public bool $closed = false;
+
+    public function __construct(private readonly WorkerRuntime $runtime)
+    {
+    }
+
+    public function run(Closure $operation): mixed
+    {
+        ++$this->runs;
+        $this->active = true;
+
+        try {
+            return $operation($this->runtime);
+        } finally {
+            $this->active = false;
+            $this->closed = true;
+        }
     }
 }
 

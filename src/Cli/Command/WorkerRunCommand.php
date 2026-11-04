@@ -9,6 +9,7 @@ use Fedor\MessageBus\Worker\Cli\InputOptionValue;
 use Fedor\MessageBus\Worker\Process\PcntlSignalCancellation;
 use Fedor\MessageBus\Worker\Queue\ConsumerOptions;
 use Fedor\MessageBus\Worker\Queue\QueueWorkerRunnerOptions;
+use Fedor\MessageBus\Worker\Runtime\WorkerRuntime;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -55,7 +56,6 @@ final class WorkerRunCommand extends Command
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $runtime = $this->bootstrapResolver->resolve(InputOptionValue::nullableString($input, 'bootstrap'));
         $consumerOptions = new ConsumerOptions(
             transport: InputOptionValue::string($input, 'transport'),
             queue: InputOptionValue::string($input, 'queue'),
@@ -84,28 +84,35 @@ final class WorkerRunCommand extends Command
             controlPollIntervalMilliseconds: InputOptionValue::integer($input, 'control-poll-interval'),
             restartExitCode: InputOptionValue::integer($input, 'restart-exit-code'),
         );
-        $signalCancellation = new PcntlSignalCancellation();
+        $bootstrapPath = InputOptionValue::nullableString($input, 'bootstrap');
 
-        try {
-            $result = $runtime->runner->run(
-                $consumerOptions,
-                $runnerOptions,
-                $signalCancellation->cancellation(),
-            );
-        } finally {
-            $signalCancellation->close();
-        }
+        return $this->bootstrapResolver->run(
+            $bootstrapPath,
+            static function (WorkerRuntime $runtime) use ($consumerOptions, $runnerOptions, $output): int {
+                $signalCancellation = new PcntlSignalCancellation();
 
-        $output->writeln(sprintf(
-            'handled=%d succeeded=%d retried=%d rejected=%d cancelled=%d lease_lost=%d',
-            $result->handled,
-            $result->succeeded,
-            $result->retried,
-            $result->rejected,
-            $result->cancelled,
-            $result->leaseLost,
-        ));
+                try {
+                    $result = $runtime->runner->run(
+                        $consumerOptions,
+                        $runnerOptions,
+                        $signalCancellation->cancellation(),
+                    );
+                } finally {
+                    $signalCancellation->close();
+                }
 
-        return $result->exitCode ?? self::SUCCESS;
+                $output->writeln(sprintf(
+                    'handled=%d succeeded=%d retried=%d rejected=%d cancelled=%d lease_lost=%d',
+                    $result->handled,
+                    $result->succeeded,
+                    $result->retried,
+                    $result->rejected,
+                    $result->cancelled,
+                    $result->leaseLost,
+                ));
+
+                return $result->exitCode ?? self::SUCCESS;
+            },
+        );
     }
 }

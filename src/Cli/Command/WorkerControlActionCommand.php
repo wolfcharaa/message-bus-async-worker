@@ -6,6 +6,7 @@ namespace Fedor\MessageBus\Worker\Cli\Command;
 
 use Fedor\MessageBus\Worker\Cli\BootstrapResolver;
 use Fedor\MessageBus\Worker\Control\WorkerControlCommandType;
+use Fedor\MessageBus\Worker\Control\WorkerControlRuntime;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 
@@ -29,13 +30,15 @@ final class WorkerControlActionCommand extends AbstractWorkerControlCommand
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $receipt = $this->dispatchControl(
-            $this->controlRuntime($input),
-            $this->type,
-            $this->target($input),
-            $this->request($input),
-        );
+        $target = $this->target($input);
+        $request = $this->request($input);
 
-        return $this->writeReceipt($output, $receipt);
+        return $this->withControlRuntime(
+            $input,
+            fn(WorkerControlRuntime $runtime): int => $this->writeReceipt(
+                $output,
+                $this->dispatchControl($runtime, $this->type, $target, $request),
+            ),
+        );
     }
 }

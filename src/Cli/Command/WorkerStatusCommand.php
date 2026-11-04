@@ -6,6 +6,8 @@ namespace Fedor\MessageBus\Worker\Cli\Command;
 
 use Fedor\MessageBus\Worker\Cli\BootstrapResolver;
 use Fedor\MessageBus\Worker\Cli\InputOptionValue;
+use Fedor\MessageBus\Worker\Control\WorkerControlRuntime;
+use Fedor\MessageBus\Worker\Control\WorkerTarget;
 use Symfony\Component\Console\Helper\Table;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -29,8 +31,27 @@ final class WorkerStatusCommand extends AbstractWorkerControlCommand
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $runtime = $this->controlRuntime($input);
-        $workers = $runtime->statusService->listWorkers($this->target($input, defaultAll: true));
+        $target = $this->target($input, defaultAll: true);
+        $includeChildren = InputOptionValue::boolean($input, 'children');
+
+        return $this->withControlRuntime(
+            $input,
+            fn(WorkerControlRuntime $runtime): int => $this->renderStatus(
+                $runtime,
+                $target,
+                $includeChildren,
+                $output,
+            ),
+        );
+    }
+
+    private function renderStatus(
+        WorkerControlRuntime $runtime,
+        WorkerTarget $target,
+        bool $includeChildren,
+        OutputInterface $output,
+    ): int {
+        $workers = $runtime->statusService->listWorkers($target);
 
         $table = new Table($output);
         $table->setHeaders([
@@ -53,7 +74,7 @@ final class WorkerStatusCommand extends AbstractWorkerControlCommand
         }
         $table->render();
 
-        if (InputOptionValue::boolean($input, 'children')) {
+        if ($includeChildren) {
             foreach ($workers as $worker) {
                 $children = $runtime->statusService->listChildren($worker->identity->workerInstanceId);
                 if ($children === []) {

@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Fedor\MessageBus\Worker\Cli;
 
+use Closure;
 use Fedor\MessageBus\Worker\Runtime\WorkerRuntime;
+use Fedor\MessageBus\Worker\Runtime\WorkerRuntimeProviderInterface;
 use RuntimeException;
 
 final readonly class BootstrapResolver
@@ -21,6 +23,32 @@ final readonly class BootstrapResolver
 
     public function resolve(?string $bootstrapPath = null): WorkerRuntime
     {
+        $bootstrap = $this->load($bootstrapPath);
+        if ($bootstrap instanceof WorkerRuntimeProviderInterface) {
+            throw new RuntimeException(
+                'Managed worker bootstrap cannot be resolved outside its lifecycle; use BootstrapResolver::run().',
+            );
+        }
+
+        return $bootstrap;
+    }
+
+    /**
+     * @template TResult
+     * @param Closure(WorkerRuntime): TResult $operation
+     * @return TResult
+     */
+    public function run(?string $bootstrapPath, Closure $operation): mixed
+    {
+        $bootstrap = $this->load($bootstrapPath);
+
+        return $bootstrap instanceof WorkerRuntimeProviderInterface
+            ? $bootstrap->run($operation)
+            : $operation($bootstrap);
+    }
+
+    private function load(?string $bootstrapPath): WorkerRuntime|WorkerRuntimeProviderInterface
+    {
         $path = $bootstrapPath ?? $this->environmentPath() ?? $this->conventionPath();
 
         if ($path === null || !is_file($path)) {
@@ -29,12 +57,16 @@ final readonly class BootstrapResolver
             );
         }
 
-        $runtime = require $path;
-        if (!$runtime instanceof WorkerRuntime) {
-            throw new RuntimeException('Worker bootstrap must return ' . WorkerRuntime::class . '.');
+        $bootstrap = require $path;
+        if (!$bootstrap instanceof WorkerRuntime && !$bootstrap instanceof WorkerRuntimeProviderInterface) {
+            throw new RuntimeException(sprintf(
+                'Worker bootstrap must return %s or %s.',
+                WorkerRuntime::class,
+                WorkerRuntimeProviderInterface::class,
+            ));
         }
 
-        return $runtime;
+        return $bootstrap;
     }
 
     private function environmentPath(): ?string

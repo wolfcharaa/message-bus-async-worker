@@ -3,11 +3,13 @@
 The package installs `vendor/bin/message-bus-worker` as the application root
 for queue workers and worker-control operations. It uses Symfony Console but
 does not discover or import an application container. The host application
-must provide an explicit PHP bootstrap returning `WorkerRuntime`.
+must provide an explicit PHP bootstrap returning either `WorkerRuntime` or a
+managed `WorkerRuntimeProviderInterface`.
 
 ## Bootstrap
 
-Create an application-owned file such as `config/message-bus-worker.php`:
+For a manually owned process lifecycle, create an application file such as
+`config/message-bus-worker.php`:
 
 ```php
 <?php
@@ -31,6 +33,38 @@ commands fail clearly when it is absent. When control is supplied, construct
 the runner with the same `WorkerControlRuntime` instance so CLI commands and the
 running worker share one control plane.
 
+For a container that owns pools, clients, scopes, or other disposable
+resources, return a `WorkerRuntimeProviderInterface` instead. This is the
+recommended integration:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use Closure;
+use Fedor\MessageBus\Worker\Runtime\WorkerRuntime;
+use Fedor\MessageBus\Worker\Runtime\WorkerRuntimeProviderInterface;
+use Thesis\Dic;
+
+return new class implements WorkerRuntimeProviderInterface {
+    public function run(Closure $operation): mixed
+    {
+        return Dic::run(
+            new ApplicationWorkerRuntimeModule(),
+            static fn(WorkerRuntime $runtime): mixed => $operation($runtime),
+        );
+    }
+};
+```
+
+`ApplicationWorkerRuntimeModule` is supplied by the host application; Thesis
+DIC is shown only as one lifecycle implementation and is not a dependency of
+this package. The provider callback must keep the runtime valid for the whole
+operation and release resources in success and failure paths. Every executable
+command, including status and control operations, performs all runtime access
+inside that callback.
+
 The resolver checks sources in this order:
 
 1. `--bootstrap`;
@@ -38,8 +72,12 @@ The resolver checks sources in this order:
 3. `message-bus-worker.php`, `config/message-bus-worker.php`, then
    `config/message_bus_worker.php` in the current working directory.
 
-The returned value must be exactly a `WorkerRuntime`. PSR-11 and framework
-container adaptation belongs in the application bootstrap, not this package.
+The returned value must implement `WorkerRuntimeProviderInterface` or be a
+direct `WorkerRuntime`. Direct runtime bootstraps remain supported for backward
+compatibility when the host owns teardown elsewhere. `BootstrapResolver::run()`
+accepts both forms; `resolve()` intentionally accepts only a direct runtime so
+a managed runtime cannot escape its lifecycle. PSR-11 and framework container
+adaptation belongs in the application bootstrap, not this package.
 
 ## Run a worker
 

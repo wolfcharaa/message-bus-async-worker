@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Fedor\MessageBus\Worker\Cli\Command;
 
+use Closure;
 use DateTimeImmutable;
 use Fedor\MessageBus\Worker\Cli\BootstrapResolver;
 use Fedor\MessageBus\Worker\Cli\InputOptionValue;
@@ -13,6 +14,7 @@ use Fedor\MessageBus\Worker\Control\WorkerControlRequest;
 use Fedor\MessageBus\Worker\Control\WorkerControlRuntime;
 use Fedor\MessageBus\Worker\Control\WorkerMode;
 use Fedor\MessageBus\Worker\Control\WorkerTarget;
+use Fedor\MessageBus\Worker\Runtime\WorkerRuntime;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -63,11 +65,18 @@ abstract class AbstractWorkerControlCommand extends Command
             ->addOption('override', null, InputOption::VALUE_NONE);
     }
 
-    protected function controlRuntime(InputInterface $input): WorkerControlRuntime
+    /**
+     * @template TResult
+     * @param Closure(WorkerControlRuntime): TResult $operation
+     * @return TResult
+     */
+    protected function withControlRuntime(InputInterface $input, Closure $operation): mixed
     {
         return $this->bootstrapResolver
-            ->resolve(InputOptionValue::nullableString($input, 'bootstrap'))
-            ->requireControl();
+            ->run(
+                InputOptionValue::nullableString($input, 'bootstrap'),
+                static fn(WorkerRuntime $runtime): mixed => $operation($runtime->requireControl()),
+            );
     }
 
     protected function target(InputInterface $input, bool $defaultAll = false): WorkerTarget

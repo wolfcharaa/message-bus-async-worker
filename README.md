@@ -82,6 +82,39 @@ authoritative `QueueMessage::bindingId`, and calls the core
 current job scope. The core executor forces local sequential execution, so a
 consumed async job cannot be enqueued again.
 
+## Thesis DIC Module
+
+The optional `WorkerModule` supplies the standard Thesis DIC job scope, queue
+worker, runner, and `WorkerRuntime` composition. Import it after the core
+`MessageBusModule`, reusing the same application service refs:
+
+```php
+use Fedor\MessageBus\Integration\Thesis\MessageBusModule;
+use Fedor\MessageBus\Worker\Integration\Thesis\WorkerModule;
+
+$handler = $dic->object(FindAddressHandler::class)->canBeScoped();
+$services = [FindAddressHandler::class => $handler];
+$messageBus = $dic->import(new MessageBusModule(
+    registry: $dic->value($compiledRegistry),
+    services: $services,
+));
+
+return $dic->import(new WorkerModule(
+    consumer: $postgresConsumer,
+    leaseControl: $postgresConsumer,
+    executor: $messageBus,
+    serializer: $envelopeSerializer,
+    services: $services,
+    control: $workerControlRuntime,
+));
+```
+
+Install `thesis/dic` in the application to use these modules; neither library
+requires it at runtime. Applications that decorate the queue worker or own a
+different job lifecycle can pass an explicit `scopeFactory` instead of
+`executor`, `serializer`, and `services`. Consumer storage, codecs, registry,
+control adapters, and process resources remain application-owned.
+
 ## Worker Control
 
 `DefaultWorkerControlService` and `PostgresWorkerControlGateway` preserve the

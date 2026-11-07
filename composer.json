@@ -1,6 +1,14 @@
 {
     "name": "romanfedorskij/message-bus-async-worker",
     "description": "Optional worker runtime for romanfedorskij/message-bus-async",
+    "keywords": [
+        "amphp",
+        "message-bus",
+        "postgresql",
+        "queue",
+        "worker"
+    ],
+    "homepage": "https://github.com/wolfcharaa/message-bus-async-worker",
     "license": "MIT",
     "type": "library",
     "bin": [
@@ -38,6 +46,10 @@
             "email": "markaryanroma@mail.ru"
         }
     ],
+    "support": {
+        "issues": "https://github.com/wolfcharaa/message-bus-async-worker/issues",
+        "source": "https://github.com/wolfcharaa/message-bus-async-worker"
+    },
     "config": {
         "sort-packages": true
     },

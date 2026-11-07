@@ -1,176 +1,129 @@
 # Message Bus Async Worker
 
-Optional operational worker runtime for
-`romanfedorskij/message-bus-async`.
+Optional AMPHP worker runtime and Symfony Console CLI for
+[`romanfedorskij/message-bus-async`](https://github.com/wolfcharaa/message-bus-async).
+It consumes durable PostgreSQL jobs, opens one application service scope per
+job, executes the exact queued binding, and persists guarded outcomes.
 
-> Status: pre-release `0.1.0`. PostgreSQL consumption, durable transitions, the
-> AMPHP runner with per-job scopes, and the PostgreSQL worker control storage
-> are implemented. The runner applies durable worker-control commands and the
-> exact queued-binding adapter is available. A standalone Symfony Console
-> executable now exposes worker run, control, status, and schema operations.
+The first stable package line is `0.1.x` and requires a compatible core `^0.1`.
 
-## Responsibility Boundary
+## What It Provides
 
-The worker package owns:
+| Capability | Main type or command |
+| --- | --- |
+| PostgreSQL claim and guarded transitions | `PostgresMessageConsumer` |
+| Cooperative AMPHP consumer loop | `QueueWorkerRunner` |
+| Exact queued-binding execution | `MessageBusQueueWorker` |
+| Per-job service scopes | `WorkerModule` or application scope factory |
+| Durable worker control and status | `PostgresWorkerControlGateway` |
+| Process cancellation | optional `PcntlSignalCancellation` |
+| Operational CLI | `vendor/bin/message-bus-worker` |
 
-- durable PostgreSQL claim and ack/retry/reject/cancel transitions;
-- lease-owner guarded heartbeat, cancellation polling, and stale recovery;
-- consumer options and received-message contracts;
-- the AMPHP-native consumer loop, per-job service scope, heartbeat monitor, and
-  graceful process cancellation;
-- v6-compatible worker control commands, desired-state targeting, worker/child
-  registry, acknowledgements, and their AMPHP PostgreSQL gateway;
-- job-scoped envelope deserialization and execution of the exact binding stored
-  in each queue row;
-- the application-owned direct or managed worker bootstrap contract, Symfony
-  Console executable, and optional PCNTL-to-AMPHP cancellation adapter.
+The core package remains responsible for dispatch, envelope codecs, queue
+enqueue/status/cancel, and the shared queue schema. Dependency direction is
+always worker to core.
 
-Producer, status, cancellation, common queue schema, message registry, and local
-dispatch remain in the core package. The dependency direction is always worker
-to core; the core package must not reference worker symbols.
+## Requirements
 
-## Platform
+- PHP `8.4.12` or newer within the PHP 8 line;
+- `romanfedorskij/message-bus-async ^0.1`;
+- AMPHP 3 and `amphp/postgres` 2;
+- `ext-pgsql` or `ext-pq` for PostgreSQL;
+- Symfony Console 7.4 or 8.1.
 
-- PHP `8.4.12` or newer within the PHP 8 major line;
-- `romanfedorskij/message-bus-async` `0.1.x`;
-- `amphp/amp` `3.1.x` or a compatible 3.x release;
-- `amphp/postgres` `2.2.1` or a compatible 2.x release, with `ext-pgsql` or
-  `ext-pq` available to the worker process;
-- `psr/clock` `1.0.x`;
-- `symfony/console` `7.4.x` or a compatible release.
+`ext-pcntl` and Thesis DIC are optional. Without PCNTL, shutdown must be
+requested through worker control or another host adapter.
 
-`ext-pcntl` is optional. When available, the executable translates `SIGTERM`,
-`SIGINT`, and `SIGQUIT` into cooperative AMPHP cancellation. Without it, process
-shutdown must be coordinated through worker control or another host adapter.
+## Installation
 
-## PostgreSQL Consumer
+Until both packages are registered in Packagist, configure their GitHub VCS
+repositories explicitly:
 
-`PostgresMessageConsumer` preserves the v6 consumer operations while replacing
-PDO with `amphp/postgres` and adding AMPHP cancellation at safe I/O boundaries.
-It claims one available job through `FOR UPDATE SKIP LOCKED`, persists the lease
-before returning the message, and guards every transition by job ID, `running`
-state, and lease owner. A worker that lost its lease therefore cannot ack or
-overwrite the job after another worker recovered it.
-
-Retry uses the policy snapshot stored by the producer. Exhausted jobs become
-`failed`; stale leases return to `pending` or become `failed` when the attempt
-budget is exhausted. Stale selection and transitions run in one transaction
-with row locks, so parallel recovery processes do not recover the same job.
-See the [PostgreSQL consumer reference](docs/reference/postgres-consumer.md) for
-the exact contracts and lifecycle limits.
-
-## Worker Runner
-
-`QueueWorkerRunner` replaces the v6 blocking `usleep()` loop with AMPHP delay
-and cancellation. Every claimed job opens a fresh core `ServiceScopeInterface`,
-resolves `QueueWorkerInterface` inside it, and disposes the scope with the
-original handler failure. A concurrent monitor heartbeats the lease and polls
-durable cancellation while cooperative handler I/O is suspended.
-
-Process cancellation stops new claims but lets the current job finish within
-the configured grace period. Expiry cancels the job and persists retry/reject
-according to its attempt budget. Durable cancellation persists `cancelled`;
-non-retryable failures persist `failed`; successful work is acknowledged only
-after the job scope has completed. Final transitions use an independent
-cancellation phase so process shutdown cannot interrupt ack/retry halfway.
-See the [worker runner reference](docs/reference/worker-runner.md).
-
-`MessageBusQueueWorker` is the built-in `QueueWorkerInterface` adapter. It
-deserializes the stored envelope, overwrites its runtime binding with the
-authoritative `QueueMessage::bindingId`, and calls the core
-`BindingEnvelopeExecutorInterface` with the resolver and cancellation of the
-current job scope. The core executor forces local sequential execution, so a
-consumed async job cannot be enqueued again.
-
-## Thesis DIC Module
-
-The optional `WorkerModule` supplies the standard Thesis DIC job scope, queue
-worker, runner, and `WorkerRuntime` composition. Import it after the core
-`MessageBusModule`, reusing the same application service refs:
-
-```php
-use Fedor\MessageBus\Integration\Thesis\MessageBusModule;
-use Fedor\MessageBus\Worker\Integration\Thesis\WorkerModule;
-
-$handler = $dic->object(FindAddressHandler::class)->canBeScoped();
-$services = [FindAddressHandler::class => $handler];
-$messageBus = $dic->import(new MessageBusModule(
-    registry: $dic->value($compiledRegistry),
-    services: $services,
-));
-
-return $dic->import(new WorkerModule(
-    consumer: $postgresConsumer,
-    leaseControl: $postgresConsumer,
-    executor: $messageBus,
-    serializer: $envelopeSerializer,
-    services: $services,
-    control: $workerControlRuntime,
-));
+```shell
+composer config repositories.message-bus-async vcs \
+  https://github.com/wolfcharaa/message-bus-async.git
+composer config repositories.message-bus-async-worker vcs \
+  https://github.com/wolfcharaa/message-bus-async-worker.git
+composer require romanfedorskij/message-bus-async-worker:^0.1
 ```
 
-Install `thesis/dic` in the application to use these modules; neither library
-requires it at runtime. Applications that decorate the queue worker or own a
-different job lifecycle can pass an explicit `scopeFactory` instead of
-`executor`, `serializer`, and `services`. Consumer storage, codecs, registry,
-control adapters, and process resources remain application-owned.
+Composer installs the executable as `vendor/bin/message-bus-worker`.
 
-## Worker Control
+## First Worker
 
-`DefaultWorkerControlService` and `PostgresWorkerControlGateway` preserve the
-v6 command, desired-state, targeting, cursor, registry, child lifecycle, and
-acknowledgement semantics while replacing PDO with `amphp/postgres`. Pause and
-resume persist durable desired state; drain, stop, kill, and restart are
-expiring one-shot commands. Every storage operation accepts AMPHP cancellation
-at safe I/O boundaries.
+The host application must provide a bootstrap returning either a direct
+`WorkerRuntime` or the recommended `WorkerRuntimeProviderInterface`. The
+provider keeps pools, clients, and container scopes alive for the whole CLI
+operation and disposes them afterward.
 
-The schema generator owns the complete worker-control table set so later
-process adapters do not require an incompatible migration. `QueueWorkerRunner`
-registers its identity, polls and acknowledges commands, heartbeats status, and
-records its final lifecycle. See the
-[worker control reference](docs/reference/worker-control.md) for the exact
-contracts, schema boundary, cursor behavior, and runtime semantics.
-
-## Worker Executable
-
-`vendor/bin/message-bus-worker` is a separate application root for worker
-processes. The host application provides a PHP bootstrap returning either a
-direct `Fedor\MessageBus\Worker\Runtime\WorkerRuntime` or the recommended
-`WorkerRuntimeProviderInterface` for container-managed lifecycle. CLI commands
-run entirely inside the provider callback, so application scopes and resources
-can be disposed after success or failure. The package never imports an
-application container automatically.
-
-```bash
+```shell
 vendor/bin/message-bus-worker worker:run \
-    --bootstrap=config/message-bus-worker.php \
-    --transport=postgres \
-    --queue=addresses
+  --bootstrap=config/message-bus-worker.php \
+  --transport=postgres \
+  --queue=addresses
 ```
 
-The same executable exposes durable pause/resume/drain/stop/kill/restart,
-worker status, and PostgreSQL control-schema generation. See the
-[worker CLI guide](docs/guides/worker-cli.md) for bootstrap examples, command
-options, exit behavior, and process-supervisor limits.
+The package does not discover an application container and does not create its
+schema on startup. Generate reference DDL with
+`worker:schema:postgres`, then apply it through the host application's versioned
+migrations before starting workers.
+
+The complete direct and managed bootstrap examples, CLI options, status, and
+control commands are in the [Worker CLI guide](docs/guides/worker-cli.md).
+
+## Execution Model
+
+1. The consumer claims one available row with a lease.
+2. The runner opens a fresh job scope and resolves the queue worker.
+3. A concurrent monitor sends heartbeats and observes cancellation/control.
+4. The exact binding stored by the producer executes locally; it is not queued
+   a second time.
+5. The consumer acknowledges, retries, rejects, or cancels with lease-owner
+   guards, then disposes the job scope.
+
+Delivery is at-least-once. A crash or stale lease can execute a message again,
+so state-changing handlers must be idempotent. CPU-bound handlers must expose
+cooperative suspension points or run behind a separate process adapter.
+
+## Process Boundary
+
+One CLI process runs one cooperative worker. Multi-process scaling, restart on
+exit code `75`, forced termination, and resource ceilings belong to systemd,
+Supervisor, Kubernetes, Docker, or another external supervisor. The package has
+no hidden fork pool.
+
+## Documentation
+
+- [Worker CLI guide](docs/guides/worker-cli.md) — bootstrap, run, status,
+  control, schema generation, and exit behavior.
+- [PostgreSQL consumer](docs/reference/postgres-consumer.md) — claims, leases,
+  transitions, retry, and stale recovery.
+- [Worker runner](docs/reference/worker-runner.md) — scopes, heartbeat,
+  cancellation, outcome mapping, and limits.
+- [Worker control](docs/reference/worker-control.md) — desired state, commands,
+  targeting, acknowledgements, and storage ownership.
+- [Core PostgreSQL queue](https://github.com/wolfcharaa/message-bus-async/blob/v0.1.0/docs/reference/postgres-queue.md)
+  — producer-side schema and delivery contract.
 
 ## Development
 
-The source workspace currently expects the core repository in the sibling
-`../MessageBusAsync` directory. Composer links it as version `0.1.0`; package
-consumers will resolve the published `^0.1` dependency normally.
+The source workspace expects the core checkout in sibling directory
+`../MessageBusAsync`; Composer links it as `0.1.0` for development.
 
-Run the fast gates with:
-
-```bash
-composer validate --strict --no-check-lock
+```shell
+composer validate --strict
 composer analyse
 composer test
 ```
 
-Run the real PostgreSQL transition gate against a disposable database whose
-user may create and drop tables:
+The optional integration suite requires a disposable PostgreSQL database whose
+user can create and drop tables:
 
-```bash
+```shell
 MESSAGE_BUS_TEST_POSTGRES_CONFIG='host=127.0.0.1 port=5432 user=test password=test db=test' \
-    composer test:integration
+  composer test:integration
 ```
+
+## License
+
+[MIT](LICENSE)

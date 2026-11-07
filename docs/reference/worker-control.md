@@ -1,40 +1,38 @@
-# Worker Control Reference
+# Worker Control
 
-The worker control API preserves the proven v6 model while using AMPHP
-cancellation and `amphp/postgres`. It is split into neutral contracts under
-`Fedor\MessageBus\Worker\Control` and the PostgreSQL adapter under
+Control API сохраняет модель v6, используя AMPHP cancellation и
+`amphp/postgres`. Нейтральные contracts находятся в
+`Fedor\MessageBus\Worker\Control`, PostgreSQL adapter — в
 `Fedor\MessageBus\Worker\Control\Postgres`.
 
-## Command service
+## Command Service
 
-`DefaultWorkerControlService` exposes `pause`, `resume`, `drain`, `stop`,
-`kill`, `restart`, and direct `send`. `WorkerControlRequest` carries the audit
-source, actor, reason, request/correlation identifiers, expiry, idempotency key,
-and override flag.
+`DefaultWorkerControlService` предоставляет `pause`, `resume`, `drain`,
+`stop`, `kill`, `restart` и прямой `send`. `WorkerControlRequest`
+содержит audit source, actor, reason, request/correlation IDs, expiry,
+idempotency key и override.
 
-Pause and resume write both a command and a durable desired state. Replaying an
-idempotency key returns the original receipt with `duplicate = true` and does
-not write the desired state again. Drain, stop, kill, and restart are one-shot
-commands and must expire. The service supplies the v6 defaults when the request
-does not specify an expiry:
+Pause/resume записывают command и durable desired state. Повтор idempotency key
+возвращает исходный receipt с `duplicate = true` и не записывает desired state
+заново. Drain, stop, kill и restart являются one-shot и должны иметь expiry.
+Defaults:
 
-- kill: 60 seconds;
-- drain, stop, and restart: 300 seconds.
+- kill — 60 секунд;
+- drain, stop и restart — 300 секунд.
 
-## Targeting and resolution
+## Targeting И Resolution
 
-`WorkerTarget` supports global, worker ID/name/instance/group, transport, queue,
-flow, binding ID/pattern, mode, and host selectors. A global target cannot be
-combined with another selector. Binding patterns use `*` as the wildcard.
+`WorkerTarget` поддерживает global, worker ID/name/instance/group, transport,
+queue, flow, binding ID/pattern, mode и host. Global target нельзя сочетать с
+другим selector. В binding pattern `*` является wildcard.
 
-Desired states are resolved in the same order as v6: highest target
-specificity first, then newest creation time. Only active states participate.
-Listing states uses overlapping target selectors rather than exact target
-equality.
+Desired states разрешаются сначала по наибольшей specificity target, затем по
+новейшему времени создания. Участвуют только active states. Listing использует
+пересекающиеся selectors, а не exact equality.
 
-## PostgreSQL gateway
+## PostgreSQL Gateway
 
-`PostgresWorkerControlGateway` implements all current control storage ports:
+`PostgresWorkerControlGateway` реализует:
 
 - `WorkerControlCommandRepositoryInterface`;
 - `WorkerDesiredStateRepositoryInterface`;
@@ -42,8 +40,7 @@ equality.
 - `WorkerRegistryInterface`;
 - `WorkerStatusRepositoryInterface`.
 
-Construct one gateway and share it between the service, worker inbox, registry,
-and operational status readers:
+Один gateway должен использоваться service, inbox, registry и status readers:
 
 ```php
 use Amp\Postgres\PostgresConnectionPool;
@@ -55,79 +52,66 @@ $control = new PostgresWorkerControlGateway($postgres);
 $service = new DefaultWorkerControlService($control, $control);
 ```
 
-Use `PostgresWorkerControlSchemaGenerator` from a migration or installer. A
-custom `WorkerControlTableDefinition` may change table names, but each name must
-be a plain PostgreSQL identifier without a schema prefix.
+`PostgresWorkerControlSchemaGenerator` вызывается из migration или installer.
+`WorkerControlTableDefinition` может менять имена таблиц; имя должно быть
+простым PostgreSQL identifier без schema prefix.
 
-The generator creates the complete v6-shaped table set for commands, desired
-state, workers, children, deliveries, acknowledgements, and audit. Delivery and
-audit rows are reserved for later process adapters; the current gateway does
-not write them. Schema version bookkeeping is intentionally left to the host
-application migration system.
+Generator создаёт tables commands, desired state, workers, children,
+deliveries, acknowledgements и audit. Delivery/audit зарезервированы для
+будущих process adapters и пока не записываются. Schema version bookkeeping
+остаётся у migration system приложения.
 
-## Inbox cursor
+## Inbox Cursor
 
-`receive(identity, cursor, cancellation)` scans non-expired commands in
-database insertion order. It returns only commands matching the worker, but its
-next cursor points to the last scanned command, including a command for another
-worker. This prevents an unrelated command from being rescanned forever.
+`receive(identity, cursor, cancellation)` читает non-expired commands в
+порядке вставки. Он возвращает только подходящие worker команды, но следующий
+cursor указывает на последнюю просмотренную команду, включая чужую. Поэтому
+нерелевантная команда не сканируется бесконечно.
 
-The cursor stores the public command ID. If that row no longer exists, the
-gateway follows v6 behavior and starts from the beginning of the remaining
-non-expired command set. Callers that delete command history must therefore
-accept replay or keep a retention window longer than the worker outage window.
+Cursor хранит public command ID. Если строка удалена, gateway начинает с начала
+оставшегося non-expired набора. При удалении history нужно принимать replay или
+держать retention дольше максимального outage worker.
 
-## Worker registry and acknowledgements
+## Registry И Acknowledgements
 
-Register a `WorkerInstance` before registering children or acknowledging a
-command. PostgreSQL foreign keys intentionally enforce this lifecycle.
-Heartbeat updates state, activity, child count, and the last applied command;
-stop records final state, timestamp, and optional failure. Child registration,
-heartbeat, and finish operations preserve queue/message correlation fields for
-operational inspection.
+`WorkerInstance` регистрируется до children и acknowledgements — это
+обеспечивают PostgreSQL foreign keys. Heartbeat обновляет state, activity,
+children count и last applied command; stop записывает финальные state/time и
+optional failure. Child lifecycle сохраняет queue/message correlation.
 
-Acknowledgement writes are idempotent per command and worker instance. A later
-write replaces state, time, message, and error details. Status readers can list
-workers by `WorkerTarget`, list children for a worker, and list acknowledgements
-for a command.
+Acknowledgement идемпотентен по command и worker instance. Новая запись заменяет
+state, time, message и error. Status readers фильтруют workers через
+`WorkerTarget`, показывают children и acknowledgements.
 
-## Runner integration
+## Интеграция С Runner
 
-Pass an optional `WorkerControlRuntime` to `QueueWorkerRunner`. The runner then
-registers a single-mode worker identity before its first claim, polls the inbox
-between jobs and from the concurrent job monitor, heartbeats idle/busy state,
-acknowledges applied commands, and records its final lifecycle.
+Передайте optional `WorkerControlRuntime` в `QueueWorkerRunner`. Runner
+регистрирует identity до первого claim, опрашивает inbox между jobs и из job
+monitor, пишет heartbeat и финальный lifecycle.
 
-Runtime behavior preserves the v6 state machine:
-
-| Command/state | Runner behavior |
+| Command/state | Поведение runner |
 | --- | --- |
-| pause / desired paused | Stops new claims and keeps polling for resume or a terminal command |
-| resume / desired resumed | Returns to claims unless a terminal command was already observed |
-| drain | Lets the current job finish, then exits |
-| stop | Lets the current job finish, then exits |
-| kill | Cancels the cooperative current handler; retry/reject still follows its persisted attempt budget |
-| restart | Lets the current job finish, records `restarting`, and returns the configured restart exit code |
+| pause / desired paused | не claims новые jobs, ждёт resume/terminal command |
+| resume / desired resumed | возвращается к claims, если terminal command не получен |
+| drain | завершает текущую job и выходит |
+| stop | завершает текущую job и выходит |
+| kill | cooperative-отменяет handler; retry/reject использует attempt budget |
+| restart | завершает job, пишет `restarting`, возвращает restart exit code |
 
-`QueueWorkerRunnerOptions` supplies worker name/group/instance/host selectors,
-control polling interval, and restart exit code. Supplying no
-`WorkerControlRuntime` preserves the queue-only runner behavior and performs no
+Без `WorkerControlRuntime` runner работает только с queue и не выполняет
 control-plane I/O.
 
-## Cancellation and current runtime limit
+## Cancellation И Ограничения
 
-Every storage method accepts `Amp\Cancellation` and checks it before AMPHP I/O
-and while consuming multi-row results. AMPHP PostgreSQL 2.x does not cancel an
-already-running statement, so an in-flight query is allowed to reach a definite
-database result before cancellation is observed at the next safe boundary.
+Storage methods принимают `Amp\Cancellation` и проверяют его до I/O и при
+чтении нескольких rows. Уже выполняющийся query не отменяется AMPHP PostgreSQL
+2.x и достигает определённого database result.
 
-Control kill, process shutdown, durable queue cancellation, and lease loss are
-kept as distinct causes. Kill follows the v6 terminated-job retry/reject
-semantics; durable queue cancellation persists `cancelled`; lease loss prevents
-the stale worker from writing a transition.
+Control kill, process shutdown, durable queue cancellation и lease loss —
+разные причины. Kill применяет retry/reject, durable cancellation сохраняет
+`cancelled`, lease loss запрещает stale worker записать transition.
 
-The current runner is cooperative and single-process. It cannot interrupt
-CPU-bound code that never suspends, and it does not send operating-system
-signals. The bundled executable optionally translates process stop signals into
-AMPHP cancellation, but it deliberately does not implement the v6 `auto/fork`
-mode. A multi-process supervisor remains a separate package boundary.
+Текущий runner cooperative и single-process. Он не прерывает CPU-bound код без
+suspension и не посылает OS signals. Bundled executable может переводить stop
+signals в cancellation, но не реализует v6 `auto/fork`. Multi-process
+supervisor остаётся отдельной границей.

@@ -1,14 +1,14 @@
-# Worker CLI Guide
+# Worker CLI
 
-The package installs `vendor/bin/message-bus-worker` as the application root
-for queue workers and worker-control operations. It uses Symfony Console but
-does not discover or import an application container. The host application
-must provide an explicit PHP bootstrap returning either `WorkerRuntime` or a
-managed `WorkerRuntimeProviderInterface`.
+Пакет устанавливает `vendor/bin/message-bus-worker` — единый вход для queue
+workers и worker-control operations. CLI использует Symfony Console, но не ищет
+и не импортирует контейнер приложения. Host application передаёт явный PHP
+bootstrap, возвращающий `WorkerRuntime` или
+`WorkerRuntimeProviderInterface`.
 
 ## Bootstrap
 
-For a manually owned process lifecycle, create an application file such as
+Если lifecycle процесса управляется вручную, создайте, например,
 `config/message-bus-worker.php`:
 
 ```php
@@ -26,161 +26,155 @@ return new WorkerRuntime(
 );
 ```
 
-`createQueueWorkerRunner()` and `createWorkerControlRuntime()` represent the
-host application's composition functions. The runner is required. Control is
-optional for queue-only execution, but all `worker:control`, action, and status
-commands fail clearly when it is absent. When control is supplied, construct
-the runner with the same `WorkerControlRuntime` instance so CLI commands and the
-running worker share one control plane.
+`createQueueWorkerRunner()` и `createWorkerControlRuntime()` обозначают
+composition functions приложения. Runner обязателен. Control опционален для
+простого queue execution; без него команды `worker:control`, action aliases и
+status завершаются понятной ошибкой. Runner и CLI должны использовать один
+`WorkerControlRuntime`.
 
-For a container that owns pools, clients, scopes, or other disposable
-resources, return a `WorkerRuntimeProviderInterface` instead. This is the
-recommended integration:
+Если контейнер владеет pools, clients, scopes или другими disposable resources,
+верните provider. Это рекомендуемый вариант:
 
 ```php
 <?php
 
 declare(strict_types=1);
 
-use Closure;
 use Fedor\MessageBus\Worker\Runtime\WorkerRuntime;
 use Fedor\MessageBus\Worker\Runtime\WorkerRuntimeProviderInterface;
 use Thesis\Dic;
 
 return new class implements WorkerRuntimeProviderInterface {
-    public function run(Closure $operation): mixed
+    public function run(\Closure $operation): mixed
     {
         return Dic::run(
             new ApplicationWorkerRuntimeModule(),
-            static fn(WorkerRuntime $runtime): mixed => $operation($runtime),
+            static fn (WorkerRuntime $runtime): mixed => $operation($runtime),
         );
     }
 };
 ```
 
-`ApplicationWorkerRuntimeModule` is supplied by the host application; Thesis
-DIC is shown only as one lifecycle implementation and is not a dependency of
-this package. The provider callback must keep the runtime valid for the whole
-operation and release resources in success and failure paths. Every executable
-command, including status and control operations, performs all runtime access
-inside that callback.
+`ApplicationWorkerRuntimeModule` предоставляет приложение. Thesis DIC здесь
+лишь пример lifecycle и не является обязательной зависимостью worker package.
+Callback provider должен сохранять runtime валидным всю operation и освобождать
+ресурсы и при успехе, и при исключении. Все команды, включая status/control,
+обращаются к runtime только внутри callback.
 
-The resolver checks sources in this order:
+Bootstrap ищется в таком порядке:
 
 1. `--bootstrap`;
 2. `MESSAGE_BUS_WORKER_BOOTSTRAP`;
-3. `message-bus-worker.php`, `config/message-bus-worker.php`, then
-   `config/message_bus_worker.php` in the current working directory.
+3. `message-bus-worker.php`, `config/message-bus-worker.php`, затем
+   `config/message_bus_worker.php` в текущем каталоге.
 
-The returned value must implement `WorkerRuntimeProviderInterface` or be a
-direct `WorkerRuntime`. Direct runtime bootstraps remain supported for backward
-compatibility when the host owns teardown elsewhere. `BootstrapResolver::run()`
-accepts both forms; `resolve()` intentionally accepts only a direct runtime so
-a managed runtime cannot escape its lifecycle. PSR-11 and framework container
-adaptation belongs in the application bootstrap, not this package.
+Результат должен быть `WorkerRuntimeProviderInterface` или прямым
+`WorkerRuntime`. Прямой runtime сохранён для совместимости, когда teardown
+выполняет host. `BootstrapResolver::run()` принимает оба варианта;
+`resolve()` намеренно принимает только прямой runtime, чтобы managed runtime
+не покинул свой lifecycle. Интеграция PSR-11/framework container выполняется в
+application bootstrap.
 
-## Run a worker
+## Запустить Worker
 
-```bash
+```shell
 vendor/bin/message-bus-worker worker:run \
-    --bootstrap=config/message-bus-worker.php \
-    --transport=postgres \
-    --queue=addresses \
-    --worker-id=address-importer \
-    --worker-name=address-importer-1 \
-    --worker-group=imports \
-    --flow=import \
-    --binding-pattern='address.*'
+  --bootstrap=config/message-bus-worker.php \
+  --transport=postgres \
+  --queue=addresses \
+  --worker-id=address-importer \
+  --worker-name=address-importer-1 \
+  --worker-group=imports \
+  --flow=import \
+  --binding-pattern='address.*'
 ```
 
-The run command maps CLI values directly to `ConsumerOptions` and
-`QueueWorkerRunnerOptions`. It supports consumer timeout/limit/lock TTL,
-flow/binding filters, maximum messages/runtime/idle time, idle delay, memory
-limit in bytes, heartbeat/cancellation/control polling intervals, graceful
-shutdown timeout, and stop-on-empty behavior. Use `worker:run --help` for the
-complete option list and defaults.
+Команда переносит значения CLI в `ConsumerOptions` и
+`QueueWorkerRunnerOptions`. Доступны timeout/limit/lock TTL, filters,
+ограничения messages/runtime/idle, idle delay, memory limit в bytes, интервалы
+heartbeat/cancellation/control, graceful shutdown timeout и stop-on-empty.
+Актуальные defaults показывает:
 
-On exit it prints one machine-readable summary:
+```shell
+vendor/bin/message-bus-worker worker:run --help
+```
+
+При выходе печатается machine-readable summary:
 
 ```text
 handled=10 succeeded=8 retried=1 rejected=0 cancelled=1 lease_lost=0
 ```
 
-Normal completion returns `0`. A durable restart command returns
-`--restart-exit-code`, default `75`, so a process supervisor can replace the
-process. Fatal bootstrap, configuration, storage, or handler failures are
-reported by Symfony Console and return a non-zero code.
+Обычное завершение возвращает `0`. Durable restart возвращает
+`--restart-exit-code`, default `75`, чтобы supervisor заменил процесс.
+Ошибки bootstrap, configuration, storage или handler дают non-zero exit code.
 
-When `ext-pcntl` is loaded, `SIGTERM`, `SIGINT`, and `SIGQUIT` request the same
-cooperative shutdown as an AMPHP cancellation: no new job is claimed, the
-current job receives its configured grace period, and its durable transition
-finishes before exit. Previous signal handlers are restored after the command.
-This is not a hard-kill mechanism and cannot interrupt CPU-bound code that never
-suspends.
+При наличии `ext-pcntl` сигналы `SIGTERM`, `SIGINT` и `SIGQUIT`
+запрашивают cooperative shutdown: новые jobs не claims, текущая получает grace
+period, durable transition завершается до выхода. Старые signal handlers
+восстанавливаются. CPU-bound код без suspension таким способом не прерывается.
 
-## Control workers
+## Управлять Workers
 
-Send a command through the general entrypoint:
+Общая команда:
 
-```bash
+```shell
 vendor/bin/message-bus-worker worker:control \
-    --bootstrap=config/message-bus-worker.php \
-    --command=drain \
-    --group=imports \
-    --reason='deployment'
+  --bootstrap=config/message-bus-worker.php \
+  --command=drain \
+  --group=imports \
+  --reason='deployment'
 ```
 
-Or use the action aliases `worker:pause`, `worker:resume`, `worker:drain`,
-`worker:stop`, `worker:kill`, and `worker:restart`:
+Action aliases: `worker:pause`, `worker:resume`, `worker:drain`,
+`worker:stop`, `worker:kill` и `worker:restart`.
 
-```bash
+```shell
 vendor/bin/message-bus-worker worker:pause \
-    --bootstrap=config/message-bus-worker.php \
-    --worker-instance-id=worker.importer.host.42.abcd \
-    --created-by=deploy \
-    --idempotency-key=deploy-2026-11-03-pause
+  --bootstrap=config/message-bus-worker.php \
+  --worker-instance-id=worker.importer.host.42.abcd \
+  --created-by=deploy \
+  --idempotency-key=deploy-2026-11-03-pause
 ```
 
-A control command requires an explicit target: worker ID/name/instance/group,
-transport, queue, flow, binding ID/pattern, mode, host, or `--all`. Audit
-options preserve source, actor, reason, request/correlation identifiers,
-expiry, idempotency, and override semantics. Success prints the command ID,
-type, and duplicate flag.
+Control command требует явную цель: worker ID/name/instance/group, transport,
+queue, flow, binding ID/pattern, mode, host или `--all`. Audit options
+сохраняют source, actor, reason, request/correlation IDs, expiry, idempotency и
+override. Успех печатает command ID, type и duplicate flag.
 
-## Inspect workers
+## Посмотреть Состояние
 
-```bash
+```shell
 vendor/bin/message-bus-worker worker:status \
-    --bootstrap=config/message-bus-worker.php \
-    --group=imports \
-    --children
+  --bootstrap=config/message-bus-worker.php \
+  --group=imports \
+  --children
 ```
 
-With no target filters, status defaults to all registered workers. `--children`
-adds child process/job rows when the configured status service exposes them.
+Без target filters status показывает все зарегистрированные workers.
+`--children` добавляет child process/job rows, если status service их
+поддерживает.
 
-## Generate the control schema
+## Сгенерировать Schema
 
-Print the PostgreSQL DDL:
+Вывести PostgreSQL DDL:
 
-```bash
+```shell
 vendor/bin/message-bus-worker worker:schema:postgres
 ```
 
-Or write it to an application migration artifact:
+Записать его в application migration artifact:
 
-```bash
+```shell
 vendor/bin/message-bus-worker worker:schema:postgres \
-    --output=resources/sql/message-bus-worker.sql
+  --output=resources/sql/message-bus-worker.sql
 ```
 
-The command generates only worker-control tables. The core queue schema and
-application migration bookkeeping remain owned by their respective packages.
+Команда генерирует только worker-control tables. Core queue schema и migration
+bookkeeping остаются ответственностью соответствующих пакетов и приложения.
 
-## Process boundary
+## Граница Процесса
 
-The executable runs one cooperative AMPHP worker. It intentionally has no
-`auto/fork` mode and does not manage a process pool. Multi-process scaling,
-forced termination, and worker replacement belong to a separate supervisor or
-future optional process package; the async worker kernel stays usable without
-those dependencies.
+Executable запускает один cooperative AMPHP worker. В нём намеренно нет
+`auto/fork` и process pool. Multi-process scaling, hard termination и
+replacement выполняет внешний supervisor или отдельный process package.

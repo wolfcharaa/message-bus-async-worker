@@ -1,15 +1,15 @@
-# Worker Runner Reference
+# Worker Runner
 
-`QueueWorkerRunner` is the operational AMPHP loop around
-`MessageConsumerInterface`, `QueueLeaseControlInterface`, and a per-job
-`ServiceScopeInterface`. It performs no blocking sleep and has no dependency on
-Symfony Console, PCNTL, or process-global mutable state.
+`QueueWorkerRunner` — операционный AMPHP loop вокруг
+`MessageConsumerInterface`, `QueueLeaseControlInterface` и отдельного
+`ServiceScopeInterface` на job. Он не использует blocking sleep и не зависит
+от Symfony Console, PCNTL или process-global mutable state.
 
-## Job scope
+## Job Scope
 
-Every claimed `ReceivedQueueMessage` opens a fresh scope through the core
-`ServiceScopeFactoryInterface`. The runner resolves
-`QueueWorkerInterface` from that scope and invokes:
+Для каждого `ReceivedQueueMessage` runner открывает новый scope через core
+`ServiceScopeFactoryInterface`, разрешает из него `QueueWorkerInterface` и
+вызывает:
 
 ```php
 public function handle(
@@ -18,85 +18,77 @@ public function handle(
 ): void;
 ```
 
-`MessageBusQueueWorker` is the built-in adapter. It deserializes the embedded
-core `SerializedEnvelope`, applies the authoritative
-`QueueMessage::bindingId`, and invokes `BindingEnvelopeExecutorInterface` with
-the current scope resolver and cancellation. The core `MessageBus` implements
-that contract by forcing the one binding through the local sequential pipeline;
-it does not invoke the async queue strategy again. The scope is disposed once
-with the original handler error, if any.
+Встроенный `MessageBusQueueWorker` десериализует core
+`SerializedEnvelope`, применяет authoritative `QueueMessage::bindingId` и
+вызывает `BindingEnvelopeExecutorInterface` с текущими scope resolver и
+cancellation. Core `MessageBus` принудительно выполняет один binding локально,
+не вызывая queue strategy повторно. Scope закрывается один раз и получает
+исходную handler error, если она была.
 
-## Concurrent lease monitor
+## Параллельный Lease Monitor
 
-While cooperative handler I/O is suspended, an AMPHP monitor:
+Пока cooperative handler ожидает I/O, AMPHP monitor:
 
-- heartbeats the current lease at `heartbeatIntervalMilliseconds`;
-- polls the durable cancellation flag at
+- обновляет heartbeat с `heartbeatIntervalMilliseconds`;
+- опрашивает durable cancellation с
   `cancellationPollIntervalMilliseconds`;
-- observes process cancellation without immediately abandoning the job;
-- cancels the handler after `gracefulShutdownTimeoutSeconds` expires.
+- замечает process cancellation, не бросая job сразу;
+- отменяет handler после `gracefulShutdownTimeoutSeconds`.
 
-`QueueLeaseLost` cancels the handler and prevents any later ack/retry/reject
-write by this worker. Durable cancellation uses `QueueCancellationRequested` as
-the cancellation cause. Grace-period expiry uses `GracefulShutdownExpired` and
-follows the ordinary retry budget.
+`QueueLeaseLost` отменяет handler и запрещает этому worker позднее записать
+ack/retry/reject. Durable cancellation использует причину
+`QueueCancellationRequested`, истечение grace — `GracefulShutdownExpired`
+и обычный retry budget.
 
-Monitoring is cooperative: a CPU-bound handler that never suspends prevents the
-event loop from sending heartbeats or observing cancellation. Such work must be
-chunked with suspension points or moved to a process adapter.
+Monitoring кооперативен. CPU-bound handler без suspension не позволяет event
+loop обновить heartbeat или заметить cancellation. Такую работу нужно дробить
+с suspension points или переносить в process adapter.
 
-## Durable outcome mapping
+## Durable Outcome
 
-| Outcome | Consumer transition |
+| Результат | Transition consumer |
 | --- | --- |
-| Handler and scope complete successfully | `ack` |
+| Handler и scope завершились успешно | `ack` |
 | Durable cancellation request | `cancel` |
 | `NonRetryableMessageExceptionInterface` | `reject` |
-| Other failure with attempts remaining | `retry` |
-| Other failure with exhausted attempts | `reject` |
-| Lease lost | No transition from the stale worker |
+| Другая ошибка, attempts остались | `retry` |
+| Другая ошибка, attempts исчерпаны | `reject` |
+| Lease потерян | stale worker ничего не записывает |
 
-Transitions run with an independent `NullCancellation`. A process stop may
-cancel handler work after the grace period, but it does not interrupt the
-durable transition that records the outcome. PostgreSQL lease guards remain the
-final authority if ownership changed concurrently.
+Transitions выполняются с независимым `NullCancellation`. Process stop может
+отменить handler после grace period, но не прерывает запись durable outcome.
+PostgreSQL lease guards остаются финальной проверкой ownership.
 
-`QueueWorkerRunResult` reports handled, succeeded, retried, rejected, cancelled,
-and lease-lost counts.
+`QueueWorkerRunResult` содержит handled, succeeded, retried, rejected,
+cancelled и lease-lost counters.
 
-## Loop limits
+## Ограничения Loop
 
-`QueueWorkerRunnerOptions` supports:
+`QueueWorkerRunnerOptions` поддерживает:
 
-- maximum messages, process runtime, and idle duration;
-- stop-on-empty behavior and AMPHP idle delay;
-- a process memory ceiling;
-- heartbeat and cancellation-poll intervals;
+- максимальное число messages, runtime и idle duration;
+- stop-on-empty и AMPHP idle delay;
+- process memory ceiling;
+- heartbeat и cancellation-poll intervals;
 - graceful shutdown timeout.
 
-The cancellation passed to `run()` is a stop request. Before a claim it ends the
-loop immediately. During a job it stops future claims and starts the grace
-window; the current handler may still finish and be acknowledged.
+Cancellation в `run()` — запрос остановки. До claim он сразу завершает loop.
+Во время job прекращает будущие claims и запускает grace window; текущий handler
+может успеть завершиться и получить ack.
 
-`PcntlSignalCancellation` is the optional process adapter used by the bundled
-Console executable. When `ext-pcntl` is available it translates `SIGTERM`,
-`SIGINT`, and `SIGQUIT` into the cancellation passed to `run()` and restores
-the previous handlers when the command finishes. The runner itself remains
-independent of Console and process-global signal state.
+Optional `PcntlSignalCancellation` переводит `SIGTERM`, `SIGINT` и
+`SIGQUIT` в cancellation и восстанавливает предыдущие handlers. Сам runner
+остаётся независимым от Console и signal state.
 
-## Worker control runtime
+## Worker Control Runtime
 
-An optional `WorkerControlRuntime` enables the v6 worker control state machine
-without changing queue-only composition. The runner registers a single-mode
-worker, polls commands and desired state before claims and during suspended job
-handling, acknowledges applied commands, heartbeats idle/busy state, and writes
-the final stopped, failed, or restarting lifecycle.
+Optional `WorkerControlRuntime` включает control state machine. Runner
+регистрирует single-mode worker, опрашивает commands/desired state до claims и
+во время job, подтверждает команды, пишет heartbeat и финальное состояние.
 
-Pause and resume affect future claims. Drain, stop, and restart allow the
-current job to finish. Kill cancels the cooperative handler and settles the job
-through its existing retry/reject budget. Restart exposes
-`QueueWorkerRunResult::exitCode`; `worker:run` returns that code to a process
+Pause/resume влияют на будущие claims. Drain, stop и restart дают текущей job
+закончиться. Kill cooperative-отменяет handler и применяет его retry/reject
+budget. Restart возвращает через `QueueWorkerRunResult::exitCode` код для
 supervisor.
 
-See the [worker control reference](worker-control.md) for targeting, cursor,
-schema, registry, and acknowledgement contracts.
+Подробности — в [worker control](worker-control.md).

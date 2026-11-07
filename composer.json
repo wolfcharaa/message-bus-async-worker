@@ -1,6 +1,6 @@
 {
     "name": "romanfedorskij/message-bus-async-worker",
-    "description": "Optional worker runtime for romanfedorskij/message-bus-async",
+    "description": "AMPHP PostgreSQL worker runtime and control CLI for romanfedorskij/message-bus-async",
     "keywords": [
         "amphp",
         "message-bus",

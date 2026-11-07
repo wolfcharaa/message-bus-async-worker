@@ -1,43 +1,48 @@
 # Message Bus Async Worker
 
-Optional AMPHP worker runtime and Symfony Console CLI for
+Опциональный AMPHP runtime и Symfony Console CLI для
 [`romanfedorskij/message-bus-async`](https://github.com/wolfcharaa/message-bus-async).
-It consumes durable PostgreSQL jobs, opens one application service scope per
-job, executes the exact queued binding, and persists guarded outcomes.
+Пакет получает durable jobs из PostgreSQL, открывает application scope на job,
+выполняет точный queued binding и сохраняет результат с проверкой lease.
 
-The first stable package line is `0.1.x` and requires a compatible core `^0.1`.
+Линия `0.1.x` требует совместимый core `^0.1`.
 
-## What It Provides
+## Когда Пакет Нужен
 
-| Capability | Main type or command |
-| --- | --- |
-| PostgreSQL claim and guarded transitions | `PostgresMessageConsumer` |
-| Cooperative AMPHP consumer loop | `QueueWorkerRunner` |
-| Exact queued-binding execution | `MessageBusQueueWorker` |
-| Per-job service scopes | `WorkerModule` or application scope factory |
-| Durable worker control and status | `PostgresWorkerControlGateway` |
-| Process cancellation | optional `PcntlSignalCancellation` |
-| Operational CLI | `vendor/bin/message-bus-worker` |
+- durable messages из core нужно выполнять отдельными процессами;
+- job должен иметь heartbeat, retry, cancellation и stale recovery;
+- обработчики должны получать новый service scope для каждой job;
+- workers нужно ставить на pause, resume, drain, stop или restart;
+- runtime должен работать кооперативно в AMPHP event loop без скрытого fork pool.
 
-The core package remains responsible for dispatch, envelope codecs, queue
-enqueue/status/cancel, and the shared queue schema. Dependency direction is
-always worker to core.
+## Возможности
 
-## Requirements
+| Задача | Тип или команда | Документ |
+| --- | --- | --- |
+| Claim и guarded transitions PostgreSQL job | `PostgresMessageConsumer` | [Consumer](docs/reference/postgres-consumer.md) |
+| Кооперативный consumer loop | `QueueWorkerRunner` | [Runner](docs/reference/worker-runner.md) |
+| Выполнение точного queued binding | `MessageBusQueueWorker` | [Runner](docs/reference/worker-runner.md) |
+| Scope на одну job | `WorkerModule` или application scope factory | [CLI](docs/guides/worker-cli.md) |
+| Durable control и status | `PostgresWorkerControlGateway` | [Control plane](docs/reference/worker-control.md) |
+| Операционный вход | `vendor/bin/message-bus-worker` | [CLI](docs/guides/worker-cli.md) |
 
-- PHP `8.4.12` or newer within the PHP 8 line;
+Core отвечает за dispatch, envelope codecs, enqueue/status/cancel и общую queue
+schema. Зависимость направлена только от worker к core.
+
+## Требования
+
+- PHP `8.4.12` или новее в пределах PHP 8;
 - `romanfedorskij/message-bus-async ^0.1`;
-- AMPHP 3 and `amphp/postgres` 2;
-- `ext-pgsql` or `ext-pq` for PostgreSQL;
-- Symfony Console 7.4 or 8.1.
+- AMPHP 3 и `amphp/postgres` 2;
+- `ext-pgsql` или `ext-pq`;
+- Symfony Console 7.4 или 8.1.
 
-`ext-pcntl` and Thesis DIC are optional. Without PCNTL, shutdown must be
-requested through worker control or another host adapter.
+`ext-pcntl` и Thesis DIC опциональны. Без PCNTL shutdown запрашивается через
+worker control или другой host adapter.
 
-## Installation
+## Установка
 
-Until both packages are registered in Packagist, configure their GitHub VCS
-repositories explicitly:
+До регистрации пакетов в Packagist добавьте оба GitHub VCS repository:
 
 ```shell
 composer config repositories.message-bus-async vcs \
@@ -47,14 +52,14 @@ composer config repositories.message-bus-async-worker vcs \
 composer require romanfedorskij/message-bus-async-worker:^0.1
 ```
 
-Composer installs the executable as `vendor/bin/message-bus-worker`.
+Executable появится как `vendor/bin/message-bus-worker`.
 
-## First Worker
+## Первый Worker
 
-The host application must provide a bootstrap returning either a direct
-`WorkerRuntime` or the recommended `WorkerRuntimeProviderInterface`. The
-provider keeps pools, clients, and container scopes alive for the whole CLI
-operation and disposes them afterward.
+Host application предоставляет PHP bootstrap, который возвращает
+`WorkerRuntime` или рекомендуемый `WorkerRuntimeProviderInterface`. Provider
+удерживает pools, clients и container scopes на протяжении всей CLI operation и
+закрывает их после неё.
 
 ```shell
 vendor/bin/message-bus-worker worker:run \
@@ -63,52 +68,50 @@ vendor/bin/message-bus-worker worker:run \
   --queue=addresses
 ```
 
-The package does not discover an application container and does not create its
-schema on startup. Generate reference DDL with
-`worker:schema:postgres`, then apply it through the host application's versioned
-migrations before starting workers.
+Пакет не ищет application container и не создаёт schema при старте. Сгенерируйте
+worker-control DDL командой `worker:schema:postgres` и примените его через
+versioned migration приложения. Полные варианты bootstrap и команды управления
+приведены в [руководстве по CLI](docs/guides/worker-cli.md).
 
-The complete direct and managed bootstrap examples, CLI options, status, and
-control commands are in the [Worker CLI guide](docs/guides/worker-cli.md).
+## Как Выполняется Job
 
-## Execution Model
+1. Consumer claims одну доступную строку и фиксирует lease.
+2. Runner открывает новый job scope и разрешает queue worker.
+3. Параллельный monitor обновляет heartbeat и проверяет cancellation/control.
+4. Точный binding из producer выполняется локально и не ставится в очередь
+   второй раз.
+5. Consumer делает ack, retry, reject или cancel с проверкой lease owner, затем
+   scope закрывается.
 
-1. The consumer claims one available row with a lease.
-2. The runner opens a fresh job scope and resolves the queue worker.
-3. A concurrent monitor sends heartbeats and observes cancellation/control.
-4. The exact binding stored by the producer executes locally; it is not queued
-   a second time.
-5. The consumer acknowledges, retries, rejects, or cancels with lease-owner
-   guards, then disposes the job scope.
+Delivery — at-least-once. После crash или stale lease сообщение может
+выполниться повторно, поэтому state-changing handlers должны быть
+идемпотентными. CPU-bound handler обязан иметь cooperative suspension points
+или выполняться через отдельный process adapter.
 
-Delivery is at-least-once. A crash or stale lease can execute a message again,
-so state-changing handlers must be idempotent. CPU-bound handlers must expose
-cooperative suspension points or run behind a separate process adapter.
+## Граница Процесса
 
-## Process Boundary
+Один CLI process запускает один cooperative worker. Количество процессов,
+restart по exit code `75`, hard kill и resource limits настраиваются в systemd,
+Supervisor, Kubernetes, Docker или другом внешнем supervisor. Пакет не создаёт
+скрытый fork pool.
 
-One CLI process runs one cooperative worker. Multi-process scaling, restart on
-exit code `75`, forced termination, and resource ceilings belong to systemd,
-Supervisor, Kubernetes, Docker, or another external supervisor. The package has
-no hidden fork pool.
+## Документация
 
-## Documentation
+1. [Worker CLI](docs/guides/worker-cli.md) — bootstrap, run, status, control,
+   schema и exit codes.
+2. [PostgreSQL consumer](docs/reference/postgres-consumer.md) — claim, lease,
+   transitions, retry и stale recovery.
+3. [Worker runner](docs/reference/worker-runner.md) — scopes, heartbeat,
+   cancellation и outcome mapping.
+4. [Worker control](docs/reference/worker-control.md) — desired state, targeting,
+   acknowledgements и storage ownership.
+5. [Core queue contract](https://github.com/wolfcharaa/message-bus-async/blob/v0.1.0/docs/reference/postgres-queue.md)
+   — producer-side schema и delivery guarantees.
 
-- [Worker CLI guide](docs/guides/worker-cli.md) — bootstrap, run, status,
-  control, schema generation, and exit behavior.
-- [PostgreSQL consumer](docs/reference/postgres-consumer.md) — claims, leases,
-  transitions, retry, and stale recovery.
-- [Worker runner](docs/reference/worker-runner.md) — scopes, heartbeat,
-  cancellation, outcome mapping, and limits.
-- [Worker control](docs/reference/worker-control.md) — desired state, commands,
-  targeting, acknowledgements, and storage ownership.
-- [Core PostgreSQL queue](https://github.com/wolfcharaa/message-bus-async/blob/v0.1.0/docs/reference/postgres-queue.md)
-  — producer-side schema and delivery contract.
+## Разработка
 
-## Development
-
-The source workspace expects the core checkout in sibling directory
-`../MessageBusAsync`; Composer links it as `0.1.0` for development.
+Source workspace ожидает core checkout в `../MessageBusAsync`; Composer
+подключает его как `0.1.0` через path repository.
 
 ```shell
 composer validate --strict
@@ -116,14 +119,13 @@ composer analyse
 composer test
 ```
 
-The optional integration suite requires a disposable PostgreSQL database whose
-user can create and drop tables:
+Optional integration suite требует disposable PostgreSQL database:
 
 ```shell
 MESSAGE_BUS_TEST_POSTGRES_CONFIG='host=127.0.0.1 port=5432 user=test password=test db=test' \
   composer test:integration
 ```
 
-## License
+## Лицензия
 
 [MIT](LICENSE)

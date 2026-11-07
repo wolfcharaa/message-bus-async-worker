@@ -1,81 +1,77 @@
-# PostgreSQL Consumer Reference
+# PostgreSQL Consumer
 
-`PostgresMessageConsumer` is the worker-side implementation for the queue
-schema owned by `romanfedorskij/message-bus-async`. It implements
-`MessageConsumerInterface` and `QueueLeaseControlInterface` through
-`amphp/postgres`; no blocking PDO path exists.
+`PostgresMessageConsumer` — worker-side реализация queue schema из
+`romanfedorskij/message-bus-async`. Он реализует
+`MessageConsumerInterface` и `QueueLeaseControlInterface` через
+`amphp/postgres`; blocking PDO path отсутствует.
 
 ## Claim Contract
 
-`next(ConsumerOptions, Cancellation)` first recovers stale jobs for the selected
-transport and queue, then claims one available `pending` row in a transaction:
+`next(ConsumerOptions, Cancellation)` сначала восстанавливает stale jobs для
+выбранных transport/queue, затем claims одну доступную `pending` строку:
 
-1. filter by transport, queue, availability, and optional flow/binding filters;
-2. order by priority descending, availability ascending, and queue ID ascending;
-3. lock one row with `FOR UPDATE SKIP LOCKED`;
-4. change it to `running`, increment attempts, and persist worker ID, lock time,
-   heartbeat time, and start/update timestamps;
-5. commit before returning `ReceivedQueueMessage`.
+1. фильтрует transport, queue, availability и optional flow/binding;
+2. сортирует по убыванию priority, возрастанию availability и queue ID;
+3. блокирует одну строку через `FOR UPDATE SKIP LOCKED`;
+4. переводит её в `running`, увеличивает attempts и записывает worker ID,
+   lock/heartbeat/start/update timestamps;
+5. делает commit до возврата `ReceivedQueueMessage`.
 
-The returned value contains the queue ID, decoded versioned
-`SerializedEnvelope`, immutable retry snapshot, current attempt number, and
-lease owner. It never exposes a raw PostgreSQL row.
+Результат содержит queue ID, декодированный versioned
+`SerializedEnvelope`, immutable retry snapshot, attempt и lease owner. Сырая
+PostgreSQL row наружу не передаётся.
 
-`ConsumerOptions` preserves the v6 defaults: timeout 5 seconds, limit 1, worker
-ID `message-bus-worker`, and lock TTL 300 seconds. The current PostgreSQL claim
-returns one message; timeout and multi-message limit remain runner concerns.
+Defaults `ConsumerOptions`: timeout 5 секунд, limit 1, worker ID
+`message-bus-worker`, lock TTL 300 секунд. Текущий PostgreSQL claim возвращает
+одно сообщение; timeout и multi-message limit относятся к runner.
 
 ## Lease Invariant
 
-Ack, retry, reject, cancel, and heartbeat update only a row matching all three
-conditions:
+Ack, retry, reject, cancel и heartbeat обновляют строку только при совпадении:
 
-- the received queue ID;
+- queue ID;
 - `status = running`;
-- `locked_by` equals the received lease owner.
+- `locked_by` с lease owner полученного сообщения.
 
-Zero affected rows throw `QueueLeaseLost`. This prevents a slow or resumed
-worker from committing a transition after stale recovery transferred the job to
-another worker.
+Ноль изменённых строк приводит к `QueueLeaseLost`. Медленный или
+возобновившийся worker не может записать результат после передачи stale job
+другому worker.
 
-`isCancellationRequested()` uses the same guard. Producer-side
-`requestCancellation()` only persists the flag; worker code must poll it and
-persist `cancelled` when it cooperatively stops the handler.
+`isCancellationRequested()` использует тот же guard. Producer
+`requestCancellation()` только сохраняет флаг; worker должен его опрашивать и
+сохранить `cancelled` после cooperative stop.
 
 ## Durable Transitions
 
-| Operation | From | To | Persisted behavior |
+| Операция | Из | В | Эффект |
 | --- | --- | --- | --- |
-| `ack` | `running` | `succeeded` | Finish time set; lease cleared |
-| `retry` | `running` | `pending` | Next availability and error set; lease cleared |
-| exhausted `retry` | `running` | `failed` | Finish/error set; lease cleared |
-| `reject` | `running` | `failed` | Finish/error set; lease cleared |
-| `cancel` | `running` | `cancelled` | Finish/error set; lease cleared |
-| `heartbeat` | `running` | `running` | Heartbeat/update timestamps refreshed |
+| `ack` | `running` | `succeeded` | finish time, lease очищен |
+| `retry` | `running` | `pending` | next availability/error, lease очищен |
+| exhausted `retry` | `running` | `failed` | finish/error, lease очищен |
+| `reject` | `running` | `failed` | finish/error, lease очищен |
+| `cancel` | `running` | `cancelled` | finish/error, lease очищен |
+| `heartbeat` | `running` | `running` | timestamps обновлены |
 
-Fixed and exponential delays preserve the v6 calculation and use the persisted
-attempt number. Error details contain class, message, code, source location, and
-a bounded stack trace. They must not contain application secrets; handlers are
-responsible for using safe exception messages.
+Fixed и exponential delays используют сохранённый attempt. Error details
+содержат class, message, code, source location и ограниченный stack trace.
+Handlers обязаны использовать безопасные exception messages без secrets.
 
 ## Stale Recovery
 
-`recoverStale()` selects `running` rows whose latest heartbeat/lock time is older
-than the configured TTL. Selection uses `FOR UPDATE SKIP LOCKED`; all selected
-rows transition in the same transaction. Recoverable rows return to `pending`
-with their retry delay, while exhausted rows become `failed`.
+`recoverStale()` выбирает `running` rows, где последний heartbeat/lock старше
+TTL. `FOR UPDATE SKIP LOCKED` защищает выборку, все строки меняются в одной
+transaction. Recoverable jobs возвращаются в `pending` со своим retry delay,
+исчерпанные — в `failed`.
 
-The recovery call is cancellation-aware between rows. Cancellation rolls back
-the complete recovery transaction. Like the core producer, AMPHP PostgreSQL 2.x
-does not accept a cancellation token for an already-running SQL statement, so
-the consumer observes cancellation only at safe boundaries and waits for an
-in-flight statement to reach a definite result.
+Cancellation между строками откатывает всю recovery transaction. Уже
+выполняющийся SQL в AMPHP PostgreSQL 2.x не отменяется: consumer ждёт
+определённого результата и проверяет cancellation на следующей безопасной
+границе.
 
-## Runner Integration
+## Интеграция С Runner
 
-`QueueWorkerRunner` now owns the consumer loop, one service scope per job,
-concurrent heartbeat/cancellation monitoring, durable outcome selection, and
-graceful process cancellation. The job-scoped `QueueWorkerInterface` adapter
-owns envelope deserialization and execution of the exact queued binding through
-the core registry/runtime. See the [worker runner reference](worker-runner.md)
-for lifecycle and failure classification.
+`QueueWorkerRunner` владеет consumer loop, scope на job,
+heartbeat/cancellation monitor, выбором durable outcome и graceful process
+cancellation. Job-scoped `QueueWorkerInterface` десериализует envelope и
+выполняет точный queued binding. Подробности — в
+[справочнике runner](worker-runner.md).

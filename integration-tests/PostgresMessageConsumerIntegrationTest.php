@@ -122,14 +122,18 @@ final class PostgresMessageConsumerIntegrationTest extends TestCase
         $stale = $consumer->next($workerA, $cancellation);
         self::assertNotNull($stale);
         $this->clock->advance(new DateInterval('PT301S'));
-        $workerB = new ConsumerOptions('postgres', 'default', workerId: 'worker-b', lockTtlSeconds: 300);
-        self::assertSame(1, $consumer->recoverStale($workerB, $cancellation));
+        self::assertSame(1, $consumer->recoverStale($workerA, $cancellation));
         self::assertSame(QueueJobState::Pending, $this->producer->get($staleId, $cancellation)?->status);
         $this->clock->advance(new DateInterval('PT10S'));
-        $recovered = $consumer->next($workerB, $cancellation);
+        $recovered = $consumer->next($workerA, $cancellation);
         self::assertNotNull($recovered);
-        self::assertSame('worker-b', $recovered->leaseOwner);
+        self::assertSame('worker-a', $recovered->leaseOwner);
         self::assertSame(2, $recovered->attempts);
+        try {
+            $consumer->ack($stale, $cancellation);
+            self::fail('An earlier attempt must not acknowledge a re-leased job with the same worker ID.');
+        } catch (QueueLeaseLost) {
+        }
         $consumer->ack($recovered, $cancellation);
     }
 

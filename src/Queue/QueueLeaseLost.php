@@ -11,8 +11,9 @@ final class QueueLeaseLost extends RuntimeException
     public static function forMessage(ReceivedQueueMessage $message): self
     {
         return new self(sprintf(
-            'Queue lease `%s` for job `%s` is no longer active.',
+            'Queue lease `%s` attempt %d for job `%s` is no longer active.',
             $message->leaseOwner,
+            $message->attempts,
             $message->queueMessageId,
         ));
     }

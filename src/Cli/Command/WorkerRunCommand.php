@@ -41,8 +41,11 @@ final class WorkerRunCommand extends Command
             ->addOption('consumer-timeout', null, InputOption::VALUE_REQUIRED, default: 5)
             ->addOption('consumer-limit', null, InputOption::VALUE_REQUIRED, default: 1)
             ->addOption('lock-ttl', null, InputOption::VALUE_REQUIRED, default: 300)
+            ->addOption('stale-recovery-batch', null, InputOption::VALUE_REQUIRED, default: 100)
+            ->addOption('stale-recovery-interval', null, InputOption::VALUE_REQUIRED, default: 30)
             ->addOption('max-messages', null, InputOption::VALUE_REQUIRED)
             ->addOption('max-runtime', null, InputOption::VALUE_REQUIRED)
+            ->addOption('max-job-runtime', null, InputOption::VALUE_REQUIRED, default: 300)
             ->addOption('idle-timeout', null, InputOption::VALUE_REQUIRED)
             ->addOption('sleep-when-idle', null, InputOption::VALUE_REQUIRED, default: 500)
             ->addOption('memory-limit', null, InputOption::VALUE_REQUIRED)
@@ -66,6 +69,7 @@ final class WorkerRunCommand extends Command
             flows: InputOptionValue::stringList($input, 'flow'),
             bindingIds: InputOptionValue::stringList($input, 'binding-id'),
             bindingPatterns: InputOptionValue::stringList($input, 'binding-pattern'),
+            staleRecoveryBatchSize: InputOptionValue::integer($input, 'stale-recovery-batch'),
         );
         $runnerOptions = new QueueWorkerRunnerOptions(
             maxMessages: InputOptionValue::nullableInteger($input, 'max-messages'),
@@ -77,6 +81,8 @@ final class WorkerRunCommand extends Command
             heartbeatIntervalMilliseconds: InputOptionValue::integer($input, 'heartbeat-interval'),
             cancellationPollIntervalMilliseconds: InputOptionValue::integer($input, 'cancellation-poll-interval'),
             gracefulShutdownTimeoutSeconds: InputOptionValue::integer($input, 'graceful-shutdown-timeout'),
+            maxJobRuntimeSeconds: InputOptionValue::integer($input, 'max-job-runtime'),
+            staleRecoveryIntervalSeconds: InputOptionValue::integer($input, 'stale-recovery-interval'),
             workerName: InputOptionValue::nullableString($input, 'worker-name'),
             workerGroup: InputOptionValue::nullableString($input, 'worker-group'),
             workerInstanceId: InputOptionValue::nullableString($input, 'worker-instance-id'),

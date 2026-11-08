@@ -43,7 +43,6 @@ final class PostgresMessageConsumer implements MessageConsumerInterface, QueueLe
     public function next(ConsumerOptions $options, Cancellation $cancellation): ?ReceivedQueueMessage
     {
         $cancellation->throwIfRequested();
-        $this->recoverStale($options, $cancellation);
         $transaction = $this->postgres->beginTransaction();
 
         try {
@@ -188,11 +187,15 @@ final class PostgresMessageConsumer implements MessageConsumerInterface, QueueLe
         $cancellation->throwIfRequested();
         $row = $this->postgres->execute(
             'SELECT cancellation_requested FROM ' . $this->table . '
-             WHERE id = :id AND status = :running AND locked_by = :lease_owner',
+             WHERE id = :id
+               AND status = :running
+               AND locked_by = :lease_owner
+               AND attempts = :lease_attempt',
             [
                 'id' => $message->queueMessageId,
                 'running' => QueueJobState::Running->value,
                 'lease_owner' => $message->leaseOwner,
+                'lease_attempt' => $message->attempts,
             ],
         )->fetchRow();
         if ($row === null) {
@@ -218,12 +221,14 @@ final class PostgresMessageConsumer implements MessageConsumerInterface, QueueLe
                    AND queue = :queue
                    AND COALESCE(heartbeat_at, locked_at) < :threshold
                  ORDER BY updated_at ASC, id ASC
-                 FOR UPDATE SKIP LOCKED',
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT :recovery_limit',
                 [
                     'running' => QueueJobState::Running->value,
                     'transport' => $options->transport,
                     'queue' => $options->queue,
                     'threshold' => $this->formatDate($threshold),
+                    'recovery_limit' => $options->staleRecoveryBatchSize,
                 ],
             );
             $rows = iterator_to_array($result, false);
@@ -328,11 +333,15 @@ final class PostgresMessageConsumer implements MessageConsumerInterface, QueueLe
         $result = $executor->execute(
             'UPDATE ' . $this->table . '
              SET ' . $assignments . '
-             WHERE id = :id AND status = :running AND locked_by = :lease_owner',
+             WHERE id = :id
+               AND status = :running
+               AND locked_by = :lease_owner
+               AND attempts = :lease_attempt',
             $fields + [
                 'id' => $message->queueMessageId,
                 'running' => QueueJobState::Running->value,
                 'lease_owner' => $message->leaseOwner,
+                'lease_attempt' => $message->attempts,
             ],
         );
         if ($result->getRowCount() !== 1) {

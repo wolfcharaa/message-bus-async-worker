@@ -90,8 +90,9 @@ vendor/bin/message-bus-worker worker:run \
 ```
 
 Команда переносит значения CLI в `ConsumerOptions` и
-`QueueWorkerRunnerOptions`. Доступны timeout/limit/lock TTL, filters,
-ограничения messages/runtime/idle, idle delay, memory limit в bytes, интервалы
+`QueueWorkerRunnerOptions`. Доступны timeout/limit/lock TTL, filters, bounded
+stale-recovery batch и cadence, ограничения messages/process runtime/job
+runtime/idle, idle delay, memory limit в bytes, интервалы
 heartbeat/cancellation/control, graceful shutdown timeout и stop-on-empty.
 Актуальные defaults показывает:
 
@@ -113,6 +114,9 @@ handled=10 succeeded=8 retried=1 rejected=0 cancelled=1 lease_lost=0
 запрашивают cooperative shutdown: новые jobs не claims, текущая получает grace
 period, durable transition завершается до выхода. Старые signal handlers
 восстанавливаются. CPU-bound код без suspension таким способом не прерывается.
+Если grace или job runtime истекли, outcome считается неизвестным и не
+повторяется автоматически; supervisor остаётся владельцем hard kill для
+некооперативного кода.
 
 ## Управлять Workers
 

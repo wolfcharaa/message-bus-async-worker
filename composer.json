@@ -60,7 +60,7 @@
             "options": {
                 "symlink": true,
                 "versions": {
-                    "romanfedorskij/message-bus-async": "0.1.0"
+                    "romanfedorskij/message-bus-async": "0.1.1"
                 }
             }
         }

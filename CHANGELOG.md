@@ -2,6 +2,17 @@
 
 Здесь фиксируются значимые изменения проекта.
 
+## [0.1.1] - 2026-11-09
+
+- Lease transitions теперь fenced номером attempt даже при повторном
+  использовании одного worker ID.
+- Stale recovery отделён от claim path, ограничен batch size и запускается
+  runner по отдельному cadence.
+- Добавлен конечный runtime одной job; timeout, control kill и ошибки cleanup
+  сохраняются как outcome unknown без автоматического retry.
+- После ошибки cleanup runner прекращает admission и возвращает recycle exit
+  code для supervisor.
+
 ## [0.1.0] - 2026-11-07
 
 Первый публичный release.
@@ -16,4 +27,5 @@
 - Добавлены команды `message-bus-worker` для run, status, control actions и
   генерации PostgreSQL control schema.
 
+[0.1.1]: https://github.com/wolfcharaa/message-bus-async-worker/releases/tag/v0.1.1
 [0.1.0]: https://github.com/wolfcharaa/message-bus-async-worker/releases/tag/v0.1.0

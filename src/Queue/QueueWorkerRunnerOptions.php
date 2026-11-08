@@ -24,6 +24,8 @@ final readonly class QueueWorkerRunnerOptions
         public ?string $host = null,
         public int $controlPollIntervalMilliseconds = 1_000,
         public int $restartExitCode = 75,
+        public int $maxJobRuntimeSeconds = 300,
+        public int $staleRecoveryIntervalSeconds = 30,
     ) {
         self::positiveOrNull($this->maxMessages, 'Maximum messages');
         self::positiveOrNull($this->maxRuntimeSeconds, 'Maximum runtime');
@@ -41,6 +43,12 @@ final readonly class QueueWorkerRunnerOptions
         }
         if ($this->gracefulShutdownTimeoutSeconds < 1) {
             throw new InvalidArgumentException('Graceful shutdown timeout must be positive.');
+        }
+        if ($this->maxJobRuntimeSeconds < 1) {
+            throw new InvalidArgumentException('Maximum job runtime must be positive.');
+        }
+        if ($this->staleRecoveryIntervalSeconds < 1) {
+            throw new InvalidArgumentException('Stale recovery interval must be positive.');
         }
         if ($this->controlPollIntervalMilliseconds < 1) {
             throw new InvalidArgumentException('Control poll interval must be positive.');

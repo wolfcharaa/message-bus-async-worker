@@ -7,8 +7,7 @@
 
 ## Claim Contract
 
-`next(ConsumerOptions, Cancellation)` сначала восстанавливает stale jobs для
-выбранных transport/queue, затем claims одну доступную `pending` строку:
+`next(ConsumerOptions, Cancellation)` claims одну доступную `pending` строку:
 
 1. фильтрует transport, queue, availability и optional flow/binding;
 2. сортирует по убыванию priority, возрастанию availability и queue ID;
@@ -31,7 +30,8 @@ Ack, retry, reject, cancel и heartbeat обновляют строку толь
 
 - queue ID;
 - `status = running`;
-- `locked_by` с lease owner полученного сообщения.
+- `locked_by` с lease owner полученного сообщения;
+- `attempts` с номером claim, который служит fencing generation.
 
 Ноль изменённых строк приводит к `QueueLeaseLost`. Медленный или
 возобновившийся worker не может записать результат после передачи stale job
@@ -58,10 +58,12 @@ Handlers обязаны использовать безопасные exception 
 
 ## Stale Recovery
 
-`recoverStale()` выбирает `running` rows, где последний heartbeat/lock старше
-TTL. `FOR UPDATE SKIP LOCKED` защищает выборку, все строки меняются в одной
+`recoverStale()` выбирает не больше `staleRecoveryBatchSize` (`100` по
+умолчанию) `running` rows, где последний heartbeat/lock старше TTL.
+`FOR UPDATE SKIP LOCKED` защищает выборку, один bounded batch меняется в одной
 transaction. Recoverable jobs возвращаются в `pending` со своим retry delay,
-исчерпанные — в `failed`.
+исчерпанные — в `failed`. Claim path сам recovery не запускает; runner вызывает
+maintenance по отдельному `staleRecoveryIntervalSeconds` cadence.
 
 Cancellation между строками откатывает всю recovery transaction. Уже
 выполняющийся SQL в AMPHP PostgreSQL 2.x не отменяется: consumer ждёт

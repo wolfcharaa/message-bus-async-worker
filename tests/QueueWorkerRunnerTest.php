@@ -20,6 +20,7 @@ use Fedor\MessageBus\Worker\Queue\ConsumerOptions;
 use Fedor\MessageBus\Worker\Queue\MessageConsumerInterface;
 use Fedor\MessageBus\Worker\Queue\QueueLeaseControlInterface;
 use Fedor\MessageBus\Worker\Queue\QueueLeaseLost;
+use Fedor\MessageBus\Worker\Queue\QueueOutcomeUnknown;
 use Fedor\MessageBus\Worker\Queue\QueueWorkerInterface;
 use Fedor\MessageBus\Worker\Queue\QueueWorkerRunner;
 use Fedor\MessageBus\Worker\Queue\QueueWorkerRunnerOptions;
@@ -73,6 +74,7 @@ final class QueueWorkerRunnerTest extends TestCase
         self::assertSame(1, $result->succeeded);
         self::assertSame(['ack:job-1'], $consumer->transitions);
         self::assertGreaterThanOrEqual(1, $lease->heartbeats);
+        self::assertSame(1, $lease->recoveries);
         self::assertSame(1, $scopes->opened);
         self::assertSame(1, $scopes->disposed);
         self::assertSame([null], $scopes->disposeErrors);
@@ -185,7 +187,7 @@ final class QueueWorkerRunnerTest extends TestCase
         self::assertSame([], $consumer->transitions);
     }
 
-    public function testGracefulTimeoutCancelsAndRetriesTheCurrentJob(): void
+    public function testGracefulTimeoutRejectsAnOutcomeUnknownJobWithoutRetry(): void
     {
         $consumer = new RunnerConsumer([self::message('job-timeout')]);
         $processCancellation = new DeferredCancellation();
@@ -210,8 +212,64 @@ final class QueueWorkerRunnerTest extends TestCase
             $processCancellation->getCancellation(),
         );
 
-        self::assertSame(1, $result->retried);
-        self::assertSame(['retry:job-timeout'], $consumer->transitions);
+        self::assertSame(1, $result->rejected);
+        self::assertSame(['reject:job-timeout'], $consumer->transitions);
+        self::assertInstanceOf(QueueOutcomeUnknown::class, $consumer->reasons['job-timeout']);
+    }
+
+    public function testMaximumJobRuntimeRejectsAnOutcomeUnknownJobWithoutRetry(): void
+    {
+        $consumer = new RunnerConsumer([self::message('job-runtime')]);
+        $worker = new RunnerWorker(static function (
+            ReceivedQueueMessage $message,
+            Cancellation $cancellation,
+        ): void {
+            delay(2, cancellation: $cancellation);
+        });
+
+        $result = (new QueueWorkerRunner(
+            $consumer,
+            new RunnerLeaseControl(),
+            new RunnerScopeFactory($worker),
+        ))->run(
+            self::consumerOptions(),
+            new QueueWorkerRunnerOptions(
+                maxMessages: 1,
+                heartbeatIntervalMilliseconds: 5,
+                cancellationPollIntervalMilliseconds: 5,
+                maxJobRuntimeSeconds: 1,
+            ),
+        );
+
+        self::assertSame(1, $result->rejected);
+        self::assertSame(['reject:job-runtime'], $consumer->transitions);
+        self::assertInstanceOf(QueueOutcomeUnknown::class, $consumer->reasons['job-runtime']);
+    }
+
+    public function testScopeCleanupFailureRejectsAnOutcomeUnknownJobWithoutRetry(): void
+    {
+        $consumer = new RunnerConsumer([
+            self::message('job-cleanup'),
+            self::message('job-must-not-start'),
+        ]);
+        $cleanupFailure = new RuntimeException('cleanup failed');
+        $scopes = new RunnerScopeFactory(
+            new RunnerWorker(static function (): void {}),
+            $cleanupFailure,
+        );
+
+        $result = (new QueueWorkerRunner(
+            $consumer,
+            new RunnerLeaseControl(),
+            $scopes,
+        ))->run(self::consumerOptions(), self::runnerOptions(maxMessages: 1));
+
+        self::assertSame(1, $result->rejected);
+        self::assertSame(75, $result->exitCode);
+        self::assertSame(1, $consumer->claims);
+        self::assertSame(['reject:job-cleanup'], $consumer->transitions);
+        self::assertInstanceOf(QueueOutcomeUnknown::class, $consumer->reasons['job-cleanup']);
+        self::assertSame($cleanupFailure, $consumer->reasons['job-cleanup']->getPrevious()?->getPrevious());
     }
 
     public function testEmptyQueueAndOptionValidationAreDeterministic(): void
@@ -293,7 +351,7 @@ final class QueueWorkerRunnerTest extends TestCase
         self::assertSame(0, $consumer->claims);
     }
 
-    public function testControlKillCancelsCurrentJobAndUsesRetryBudget(): void
+    public function testControlKillRejectsAnOutcomeUnknownJobWithoutRetry(): void
     {
         $now = new DateTimeImmutable('2026-11-03T10:00:00+00:00');
         $kill = self::controlCommand('command-kill', WorkerControlCommandType::Kill, $now);
@@ -341,8 +399,9 @@ final class QueueWorkerRunnerTest extends TestCase
         );
 
         self::assertSame(1, $result->handled);
-        self::assertSame(1, $result->retried);
-        self::assertSame(['retry:job-killed'], $consumer->transitions);
+        self::assertSame(1, $result->rejected);
+        self::assertSame(['reject:job-killed'], $consumer->transitions);
+        self::assertInstanceOf(QueueOutcomeUnknown::class, $consumer->reasons['job-killed']);
     }
 
     private static function consumerOptions(): ConsumerOptions
@@ -417,6 +476,8 @@ final class RunnerConsumer implements MessageConsumerInterface
 
     /** @var list<string> */
     public array $transitions = [];
+    /** @var array<string, Throwable> */
+    public array $reasons = [];
     public int $claims = 0;
 
     /** @param list<ReceivedQueueMessage> $messages */
@@ -443,18 +504,21 @@ final class RunnerConsumer implements MessageConsumerInterface
     {
         $cancellation->throwIfRequested();
         $this->transitions[] = 'retry:' . $message->queueMessageId;
+        $this->reasons[$message->queueMessageId] = $reason;
     }
 
     public function reject(ReceivedQueueMessage $message, Throwable $reason, Cancellation $cancellation): void
     {
         $cancellation->throwIfRequested();
         $this->transitions[] = 'reject:' . $message->queueMessageId;
+        $this->reasons[$message->queueMessageId] = $reason;
     }
 
     public function cancel(ReceivedQueueMessage $message, Throwable $reason, Cancellation $cancellation): void
     {
         $cancellation->throwIfRequested();
         $this->transitions[] = 'cancel:' . $message->queueMessageId;
+        $this->reasons[$message->queueMessageId] = $reason;
     }
 }
 
@@ -462,6 +526,7 @@ final class RunnerLeaseControl implements QueueLeaseControlInterface
 {
     public int $heartbeats = 0;
     public int $cancellationPolls = 0;
+    public int $recoveries = 0;
 
     public function __construct(
         private readonly bool $cancellationRequested = false,
@@ -488,6 +553,9 @@ final class RunnerLeaseControl implements QueueLeaseControlInterface
 
     public function recoverStale(ConsumerOptions $options, Cancellation $cancellation): int
     {
+        $cancellation->throwIfRequested();
+        ++$this->recoveries;
+
         return 0;
     }
 }
@@ -516,8 +584,10 @@ final class RunnerScopeFactory implements ServiceScopeFactoryInterface
     /** @var list<Throwable|null> */
     public array $disposeErrors = [];
 
-    public function __construct(private readonly QueueWorkerInterface $worker)
-    {
+    public function __construct(
+        private readonly QueueWorkerInterface $worker,
+        private readonly ?Throwable $cleanupFailure = null,
+    ) {
     }
 
     public function openScope(): ServiceScopeInterface
@@ -530,6 +600,11 @@ final class RunnerScopeFactory implements ServiceScopeFactoryInterface
     public function worker(): QueueWorkerInterface
     {
         return $this->worker;
+    }
+
+    public function cleanupFailure(): ?Throwable
+    {
+        return $this->cleanupFailure;
     }
 }
 
@@ -553,6 +628,10 @@ final readonly class RunnerScope implements ServiceScopeInterface
     {
         ++$this->factory->disposed;
         $this->factory->disposeErrors[] = $error;
+        $cleanupFailure = $this->factory->cleanupFailure();
+        if ($cleanupFailure !== null) {
+            throw $cleanupFailure;
+        }
     }
 }
 

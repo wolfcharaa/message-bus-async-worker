@@ -23,6 +23,7 @@ final readonly class ConsumerOptions
         public array $flows = [],
         public array $bindingIds = [],
         public array $bindingPatterns = [],
+        public int $staleRecoveryBatchSize = 100,
     ) {
         self::nonEmpty($this->transport, 'Transport');
         self::nonEmpty($this->queue, 'Queue');
@@ -35,6 +36,9 @@ final readonly class ConsumerOptions
         }
         if ($this->lockTtlSeconds < 1) {
             throw new InvalidArgumentException('Consumer lock TTL must be positive.');
+        }
+        if ($this->staleRecoveryBatchSize < 1) {
+            throw new InvalidArgumentException('Stale recovery batch size must be positive.');
         }
 
         self::nonEmptyList($this->flows, 'Flow filter');

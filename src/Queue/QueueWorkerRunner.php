@@ -10,6 +10,7 @@ use Amp\DeferredCancellation;
 use Amp\NullCancellation;
 use Fedor\MessageBus\Exception\NonRetryableMessageExceptionInterface;
 use Fedor\MessageBus\Service\ServiceReference;
+use Fedor\MessageBus\Service\ServiceScopeFailure;
 use Fedor\MessageBus\Service\ServiceScopeFactoryInterface;
 use Fedor\MessageBus\Service\ServiceScopeInterface;
 use Fedor\MessageBus\Service\ServiceScopeRunner;
@@ -57,6 +58,8 @@ final readonly class QueueWorkerRunner
         $controlStarted = false;
         $lastControlPollAt = 0.0;
         $lastWorkerHeartbeatAt = 0.0;
+        $lastStaleRecoveryAt = null;
+        $recycleRequested = false;
         $runnerFailure = null;
 
         try {
@@ -95,6 +98,17 @@ final readonly class QueueWorkerRunner
                 }
 
                 try {
+                    $lastStaleRecoveryAt = $this->maintainQueue(
+                        $consumerOptions,
+                        $runnerOptions,
+                        $cancellation,
+                        $lastStaleRecoveryAt,
+                    );
+                } catch (CancelledException) {
+                    break;
+                }
+
+                try {
                     $message = $this->consumer->next($consumerOptions, $cancellation);
                 } catch (CancelledException) {
                     break;
@@ -120,6 +134,17 @@ final readonly class QueueWorkerRunner
                 } catch (QueueLeaseLost) {
                     ++$leaseLost;
                 } catch (Throwable $error) {
+                    if ($error instanceof ServiceScopeFailure) {
+                        $this->consumer->reject(
+                            $message,
+                            QueueOutcomeUnknown::forMessage($message, $error),
+                            new NullCancellation(),
+                        );
+                        ++$rejected;
+                        $recycleRequested = true;
+                        break;
+                    }
+
                     $reason = $this->cancellationReason($error);
                     if ($reason instanceof QueueCancellationRequested) {
                         $this->consumer->cancel($message, $reason, new NullCancellation());
@@ -127,7 +152,9 @@ final readonly class QueueWorkerRunner
                         continue;
                     }
 
-                    $failure = $reason ?? $error;
+                    $failure = $error instanceof CancelledException
+                        ? QueueOutcomeUnknown::forMessage($message, $reason ?? $error)
+                        : ($reason ?? $error);
                     if ($failure instanceof NonRetryableMessageExceptionInterface || !$message->canRetry()) {
                         $this->consumer->reject($message, $failure, new NullCancellation());
                         ++$rejected;
@@ -164,7 +191,9 @@ final readonly class QueueWorkerRunner
             $rejected,
             $cancelled,
             $leaseLost,
-            $control?->restartRequested() === true ? $runnerOptions->restartExitCode : null,
+            $recycleRequested || $control?->restartRequested() === true
+                ? $runnerOptions->restartExitCode
+                : null,
         );
     }
 
@@ -176,6 +205,7 @@ final readonly class QueueWorkerRunner
     ): void {
         $jobCancellation = new DeferredCancellation();
         $monitorStop = new DeferredCancellation();
+        $jobStartedAt = now();
         $monitorError = null;
         $monitor = async(function () use (
             $message,
@@ -184,6 +214,7 @@ final readonly class QueueWorkerRunner
             $jobCancellation,
             $monitorStop,
             $control,
+            $jobStartedAt,
             &$monitorError,
         ): void {
             $lastHeartbeatAt = now();
@@ -203,9 +234,22 @@ final readonly class QueueWorkerRunner
                     delay($tickMilliseconds / 1000, reference: false, cancellation: $monitorStop->getCancellation());
                     $current = now();
 
+                    if (
+                        !$jobCancellation->isCancelled()
+                        && $current - $jobStartedAt >= $options->maxJobRuntimeSeconds
+                    ) {
+                        $jobCancellation->cancel(JobRuntimeExpired::forMessage(
+                            $message,
+                            $options->maxJobRuntimeSeconds,
+                        ));
+                    }
+
                     if ($processCancellation->isRequested()) {
                         $shutdownRequestedAt ??= $current;
-                        if ($current - $shutdownRequestedAt >= $options->gracefulShutdownTimeoutSeconds) {
+                        if (
+                            !$jobCancellation->isCancelled()
+                            && $current - $shutdownRequestedAt >= $options->gracefulShutdownTimeoutSeconds
+                        ) {
                             $jobCancellation->cancel(GracefulShutdownExpired::forMessage($message));
                         }
                     }
@@ -219,7 +263,7 @@ final readonly class QueueWorkerRunner
                         if ($this->leaseControl->isCancellationRequested(
                             $message,
                             $monitorStop->getCancellation(),
-                        )) {
+                        ) && !$jobCancellation->isCancelled()) {
                             $jobCancellation->cancel(QueueCancellationRequested::forMessage($message));
                         }
                         $lastCancellationPollAt = $current;
@@ -230,7 +274,7 @@ final readonly class QueueWorkerRunner
                         && ($current - $lastControlPollAt) * 1000 >= $options->controlPollIntervalMilliseconds
                     ) {
                         $control->poll($monitorStop->getCancellation());
-                        if ($control->shouldKillCurrentJob()) {
+                        if ($control->shouldKillCurrentJob() && !$jobCancellation->isCancelled()) {
                             $jobCancellation->cancel(WorkerControlKillRequested::forMessage($message));
                         }
                         $lastControlPollAt = $current;
@@ -250,11 +294,15 @@ final readonly class QueueWorkerRunner
             } catch (CancelledException $error) {
                 if (!$monitorStop->isCancelled()) {
                     $monitorError = $error;
-                    $jobCancellation->cancel($error);
+                    if (!$jobCancellation->isCancelled()) {
+                        $jobCancellation->cancel($error);
+                    }
                 }
             } catch (Throwable $error) {
                 $monitorError = $error;
-                $jobCancellation->cancel($error);
+                if (!$jobCancellation->isCancelled()) {
+                    $jobCancellation->cancel($error);
+                }
             }
         });
 
@@ -275,11 +323,34 @@ final readonly class QueueWorkerRunner
         }
 
         if ($monitorError !== null) {
+            if (!$monitorError instanceof QueueLeaseLost) {
+                throw QueueOutcomeUnknown::forMessage($message, $monitorError);
+            }
+
             throw $monitorError;
         }
         if ($handlerError !== null) {
             throw $handlerError;
         }
+    }
+
+    private function maintainQueue(
+        ConsumerOptions $consumerOptions,
+        QueueWorkerRunnerOptions $runnerOptions,
+        Cancellation $cancellation,
+        ?float $lastStaleRecoveryAt,
+    ): float {
+        $current = now();
+        if (
+            $lastStaleRecoveryAt !== null
+            && $current - $lastStaleRecoveryAt < $runnerOptions->staleRecoveryIntervalSeconds
+        ) {
+            return $lastStaleRecoveryAt;
+        }
+
+        $this->leaseControl->recoverStale($consumerOptions, $cancellation);
+
+        return now();
     }
 
     private function shouldStop(

@@ -38,7 +38,8 @@ cancellation. Core `MessageBus` принудительно выполняет о
 `QueueLeaseLost` отменяет handler и запрещает этому worker позднее записать
 ack/retry/reject. Durable cancellation использует причину
 `QueueCancellationRequested`, истечение grace — `GracefulShutdownExpired`
-и обычный retry budget.
+и outcome unknown без автоматического retry. `maxJobRuntimeSeconds` задаёт
+конечный cooperative deadline каждой job.
 
 Monitoring кооперативен. CPU-bound handler без suspension не позволяет event
 loop обновить heartbeat или заметить cancellation. Такую работу нужно дробить
@@ -50,6 +51,8 @@ loop обновить heartbeat или заметить cancellation. Такую
 | --- | --- |
 | Handler и scope завершились успешно | `ack` |
 | Durable cancellation request | `cancel` |
+| Timeout, control kill или другая cooperative cancellation | `reject` с `QueueOutcomeUnknown` |
+| Ошибка cleanup scope | `reject` с `QueueOutcomeUnknown`, stop admission и recycle exit code |
 | `NonRetryableMessageExceptionInterface` | `reject` |
 | Другая ошибка, attempts остались | `retry` |
 | Другая ошибка, attempts исчерпаны | `reject` |
@@ -70,7 +73,9 @@ cancelled и lease-lost counters.
 - stop-on-empty и AMPHP idle delay;
 - process memory ceiling;
 - heartbeat и cancellation-poll intervals;
-- graceful shutdown timeout.
+- graceful shutdown timeout и конечный runtime одной job;
+- cadence stale recovery; каждый проход обрабатывает bounded batch из
+  `ConsumerOptions`.
 
 Cancellation в `run()` — запрос остановки. До claim он сразу завершает loop.
 Во время job прекращает будущие claims и запускает grace window; текущий handler
@@ -87,8 +92,8 @@ Optional `WorkerControlRuntime` включает control state machine. Runner
 во время job, подтверждает команды, пишет heartbeat и финальное состояние.
 
 Pause/resume влияют на будущие claims. Drain, stop и restart дают текущей job
-закончиться. Kill cooperative-отменяет handler и применяет его retry/reject
-budget. Restart возвращает через `QueueWorkerRunResult::exitCode` код для
-supervisor.
+закончиться. Kill cooperative-отменяет handler и сохраняет outcome unknown без
+автоматического business retry. Restart возвращает через
+`QueueWorkerRunResult::exitCode` код для supervisor.
 
 Подробности — в [worker control](worker-control.md).

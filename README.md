@@ -80,13 +80,15 @@ versioned migration приложения. Полные варианты bootstra
 3. Параллельный monitor обновляет heartbeat и проверяет cancellation/control.
 4. Точный binding из producer выполняется локально и не ставится в очередь
    второй раз.
-5. Consumer делает ack, retry, reject или cancel с проверкой lease owner, затем
-   scope закрывается.
+5. Consumer делает ack, retry, reject или cancel с проверкой lease owner и
+   attempt generation, затем scope закрывается.
 
 Delivery — at-least-once. После crash или stale lease сообщение может
 выполниться повторно, поэтому state-changing handlers должны быть
-идемпотентными. CPU-bound handler обязан иметь cooperative suspension points
-или выполняться через отдельный process adapter.
+идемпотентными. Timeout, control kill и cleanup failure имеют неизвестный
+side-effect outcome и не повторяются автоматически. CPU-bound handler обязан
+иметь cooperative suspension points или выполняться через отдельный process
+adapter.
 
 ## Граница Процесса
 

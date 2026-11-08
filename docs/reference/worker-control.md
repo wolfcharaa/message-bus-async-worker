@@ -95,7 +95,7 @@ monitor, пишет heartbeat и финальный lifecycle.
 | resume / desired resumed | возвращается к claims, если terminal command не получен |
 | drain | завершает текущую job и выходит |
 | stop | завершает текущую job и выходит |
-| kill | cooperative-отменяет handler; retry/reject использует attempt budget |
+| kill | cooperative-отменяет handler; outcome unknown сохраняется без automatic retry |
 | restart | завершает job, пишет `restarting`, возвращает restart exit code |
 
 Без `WorkerControlRuntime` runner работает только с queue и не выполняет
@@ -108,8 +108,9 @@ Storage methods принимают `Amp\Cancellation` и проверяют ег
 2.x и достигает определённого database result.
 
 Control kill, process shutdown, durable queue cancellation и lease loss —
-разные причины. Kill применяет retry/reject, durable cancellation сохраняет
-`cancelled`, lease loss запрещает stale worker записать transition.
+разные причины. Kill и timeout сохраняют outcome unknown без automatic retry,
+durable cancellation сохраняет `cancelled`, lease loss запрещает stale worker
+записать transition.
 
 Текущий runner cooperative и single-process. Он не прерывает CPU-bound код без
 suspension и не посылает OS signals. Bundled executable может переводить stop
